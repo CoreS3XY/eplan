@@ -24,12 +24,13 @@ from __future__ import annotations
 import threading
 import unicodedata
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from .datenbank import ReferenzRepository
 from .logging import hole_protokollierer
 from .modelle import (
+    DatenbankStatus,
     EplanDatensatz,
     EplanPrueferFehler,
     Fehlertyp,
@@ -77,6 +78,8 @@ class Pruefkontext:
     normalisierer: Textnormalisierer
     referenz: ReferenzRepository | None = None
     abbruch: threading.Event | None = None
+    #: wird vom Datenbankabgleich gefüllt: laufende Nummer -> Ergebnis je Datensatz
+    datenbankstatus: dict[int, DatenbankStatus] = field(default_factory=dict)
 
     def pruefe_abbruch(self) -> None:
         if self.abbruch is not None and self.abbruch.is_set():
@@ -229,8 +232,10 @@ class DatenbankAbgleichPruefung(Pruefung):
             symbol = datensatz.symbolische_adresse
             text = datensatz.funktionstext
             n_symbol, n_text = norm.text(symbol), norm.text(text)
+            nummer = datensatz.laufende_nummer
 
             if not n_symbol or n_symbol not in texte_je_symbol:
+                kontext.datenbankstatus[nummer] = DatenbankStatus.SYMBOL_FEHLT
                 zusatz = "" if (n_text and n_text in alle_texte) else (
                     " Auch der Funktionstext ist in der Datenbank nicht vorhanden." if n_text else "")
                 beschreibung = (
@@ -239,16 +244,23 @@ class DatenbankAbgleichPruefung(Pruefung):
                     f"Symbol „{symbol}“ fehlt in der Referenzdatenbank." + zusatz)
                 fehler.append(Pruefungsfehler(Fehlertyp.SYMBOL_NICHT_IN_DB, datensatz, beschreibung))
             elif not n_text or n_text not in alle_texte:
+                kontext.datenbankstatus[nummer] = DatenbankStatus.FUNKTIONSTEXT_FEHLT
                 beschreibung = (
                     "Funktionstext ist leer; ein Abgleich mit der Datenbank ist nicht möglich."
                     if not n_text else
                     f"Funktionstext „{text}“ fehlt in der Referenzdatenbank.")
                 fehler.append(Pruefungsfehler(Fehlertyp.FUNKTIONSTEXT_NICHT_IN_DB, datensatz, beschreibung))
             elif n_text not in texte_je_symbol[n_symbol]:
+                kontext.datenbankstatus[nummer] = DatenbankStatus.KOMBINATION_ABWEICHEND
                 fehler.append(Pruefungsfehler(
                     Fehlertyp.KOMBINATION_ABWEICHEND, datensatz,
                     f"Symbol „{symbol}“ und Funktionstext „{text}“ sind einzeln in der Datenbank "
                     "vorhanden, gehören dort aber nicht zusammen."))
+            else:
+                kontext.datenbankstatus[nummer] = DatenbankStatus.VORHANDEN
+        vorhanden = sum(1 for s in kontext.datenbankstatus.values() if s is DatenbankStatus.VORHANDEN)
+        _log.info("Datenbankabgleich: %d von %d Datensätzen vollständig in der Datenbank vorhanden",
+                  vorhanden, len(daten))
         _log.info("Datenbankabgleich: %d Referenzzeilen, %d Abweichungen", len(referenz), len(fehler))
         return fehler
 
@@ -303,6 +315,7 @@ class Pruefmanager:
             bericht.fehler.extend(gefunden)
             _log.info("Prüfung „%s“: %d Fehler", pruefung.bezeichnung, len(gefunden))
 
+        bericht.datenbankstatus = dict(kontext.datenbankstatus)
         bericht.fehler.sort(key=lambda f: (f.datensatz.laufende_nummer, list(Fehlertyp).index(f.fehlertyp)))
         _log.info("Prüfung beendet: %d Fehler insgesamt, %d Prüfungen übersprungen",
                   len(bericht.fehler), len(bericht.uebersprungen))

@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -39,7 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .datenbank import erzeuge_repository
+from .datenbank import erzeuge_repository, lese_spaltennamen, lese_tabellen
 from .einstellungen import EinstellungsVerwalter
 from .eplan_parser import QuellenAuszugLeser
 from .gui_arbeiter import HintergrundAufgabe
@@ -125,48 +126,107 @@ class EinstellungsDialog(QDialog):
     def _baue_datenbank_tab(self) -> QWidget:
         seite = QWidget()
         form = QFormLayout()
-        self.e_server = QLineEdit()
-        self.e_port = QSpinBox()
-        self.e_port.setRange(1, 65535)
-        self.e_datenbank = QLineEdit()
-        self.e_benutzer = QLineEdit()
-        self.e_passwort = QLineEdit()
-        self.e_passwort.setEchoMode(QLineEdit.EchoMode.Password)
-        self.e_tabelle = QLineEdit()
-        self.e_feld_symbol = QLineEdit()
-        self.e_feld_text = QLineEdit()
-        self.e_primaer = QLineEdit()
-        self.e_primaer.setPlaceholderText("optional, z. B. id")
-        self.e_tls = QCheckBox("TLS-Verschlüsselung verwenden (empfohlen)")
+        self.e_datei = QLineEdit()
+        self.e_datei.setPlaceholderText("Pfad der SQLite-Datei, z. B. C:\\Daten\\symbole.db")
+        self.b_durchsuchen = QPushButton("Durchsuchen …")
+        self.b_durchsuchen.clicked.connect(self._datei_waehlen)
+        dateizeile = QHBoxLayout()
+        dateizeile.addWidget(self.e_datei, 1)
+        dateizeile.addWidget(self.b_durchsuchen)
+        self.e_datei.editingFinished.connect(self._lade_tabellen)
+
+        # Tabelle und Felder: frei eintragbar, nach Auswahl der Datei aber aus der Datenbank wählbar
+        self.c_tabelle = QComboBox()
+        self.c_feld_symbol = QComboBox()
+        self.c_feld_text = QComboBox()
+        self.c_primaer = QComboBox()
+        for combo in (self.c_tabelle, self.c_feld_symbol, self.c_feld_text, self.c_primaer):
+            combo.setEditable(True)
+            combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.c_primaer.lineEdit().setPlaceholderText("optional, z. B. id")
+        self.c_tabelle.currentIndexChanged.connect(lambda _i: self._lade_spalten())
+        self.c_tabelle.lineEdit().editingFinished.connect(self._lade_spalten)
         self.e_timeout = QSpinBox()
         self.e_timeout.setRange(1, 300)
         self.e_timeout.setSuffix(" s")
-        for beschriftung, widget in (
-            ("Datenbankserver:", self.e_server), ("Port:", self.e_port),
-            ("Datenbankname:", self.e_datenbank), ("Benutzer:", self.e_benutzer),
-            ("Passwort:", self.e_passwort), ("Tabellenname:", self.e_tabelle),
-            ("Feldname Symbol:", self.e_feld_symbol), ("Feldname Funktionstext:", self.e_feld_text),
-            ("Primärschlüssel:", self.e_primaer), ("Verbindungs-Timeout:", self.e_timeout),
-            ("", self.e_tls),
-        ):
-            form.addRow(beschriftung, widget)
+        self.e_timeout.setToolTip("Wartezeit, wenn die Datei gerade von einem anderen Programm gesperrt ist")
 
+        form.addRow("Datenbankdatei (*.db):", dateizeile)
+        form.addRow("Tabellenname:", self.c_tabelle)
+        form.addRow("Feldname Symbol:", self.c_feld_symbol)
+        form.addRow("Feldname Funktionstext:", self.c_feld_text)
+        form.addRow("Primärschlüssel:", self.c_primaer)
+        form.addRow("Wartezeit bei Sperre:", self.e_timeout)
+
+        self.l_auswahlhinweis = QLabel("")
+        self.l_auswahlhinweis.setWordWrap(True)
         self.b_test = QPushButton("Verbindung testen")
         self.b_test.clicked.connect(self._teste_verbindung)
         self.t_testergebnis = QPlainTextEdit()
         self.t_testergebnis.setReadOnly(True)
-        self.t_testergebnis.setMaximumHeight(110)
+        self.t_testergebnis.setMaximumHeight(120)
         self.t_testergebnis.setPlaceholderText("Das Ergebnis des Verbindungstests erscheint hier.")
 
         layout = QVBoxLayout(seite)
         layout.addLayout(form)
+        layout.addWidget(self.l_auswahlhinweis)
         layout.addWidget(self.b_test, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self.t_testergebnis)
-        hinweis = QLabel("Das Passwort wird – wie die übrigen Einstellungen – in der Konfigurationsdatei "
-                         "gespeichert. Die Datei ist nur für den angemeldeten Benutzer lesbar.")
+        hinweis = QLabel("Der Abgleich ist optional (siehe Reiter „Prüfungen“ oder Menü „Prüfung“). Die Datei wird "
+                         "zum Abgleich nur gelesen; geschrieben wird ausschließlich über „In Datenbank übernehmen“.")
         hinweis.setWordWrap(True)
         layout.addWidget(hinweis)
         return seite
+
+    def _datei_waehlen(self) -> None:
+        start = self.e_datei.text().strip() or str(Path.home())
+        pfad, _ = QFileDialog.getOpenFileName(
+            self, "SQLite-Datenbank wählen", start,
+            "SQLite-Datenbank (*.db *.sqlite *.sqlite3 *.db3);;Alle Dateien (*)")
+        if pfad:
+            self.e_datei.setText(pfad)
+            self._lade_tabellen()
+
+    @staticmethod
+    def _fuelle_combo(combo: QComboBox, eintraege: list[str], bisher: str) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(eintraege)
+        combo.setEditText(bisher)
+        if bisher in eintraege:
+            combo.setCurrentIndex(eintraege.index(bisher))
+        combo.blockSignals(False)
+
+    def _lade_tabellen(self) -> None:
+        """Füllt die Tabellenauswahl aus der Datei (Fehler werden als Hinweis angezeigt, nicht als Dialog)."""
+        pfad = self.e_datei.text().strip()
+        bisher = self.c_tabelle.currentText()
+        if not pfad:
+            self.l_auswahlhinweis.setText("")
+            return
+        try:
+            tabellen = lese_tabellen(pfad, self.e_timeout.value())
+        except EplanPrueferFehler as fehler:
+            self.l_auswahlhinweis.setText(f"Tabellen konnten nicht gelesen werden: {fehler}")
+            return
+        self.l_auswahlhinweis.setText(f"{len(tabellen)} Tabelle(n) in der Datei gefunden.")
+        self._fuelle_combo(self.c_tabelle, tabellen, bisher if bisher in tabellen else
+                           (tabellen[0] if len(tabellen) == 1 and not bisher else bisher))
+        self._lade_spalten()
+
+    def _lade_spalten(self) -> None:
+        pfad, tabelle = self.e_datei.text().strip(), self.c_tabelle.currentText().strip()
+        if not pfad or not tabelle:
+            return
+        try:
+            spalten = lese_spaltennamen(pfad, tabelle, self.e_timeout.value())
+        except EplanPrueferFehler:
+            return
+        if not spalten:
+            return
+        for combo, mit_leer in ((self.c_feld_symbol, False), (self.c_feld_text, False), (self.c_primaer, True)):
+            bisher = combo.currentText()
+            self._fuelle_combo(combo, ([""] if mit_leer else []) + spalten, bisher)
 
     def _baue_pruefungen_tab(self) -> QWidget:
         seite = QWidget()
@@ -177,7 +237,7 @@ class EinstellungsDialog(QDialog):
         self.c_texte = QCheckBox("2  Doppelte Funktionstexte")
         self.c_adressen = QCheckBox("3  Doppelte SPS-Adressen")
         self.c_platzhalter = QCheckBox("4  Platzhalter (Fragezeichen)")
-        self.c_datenbank = QCheckBox("5  Abgleich mit der Referenzdatenbank")
+        self.c_datenbank = QCheckBox("5  Abgleich mit der Referenzdatenbank (optional)")
         for c in (self.c_symbole, self.c_texte, self.c_adressen, self.c_platzhalter, self.c_datenbank):
             gl.addWidget(c)
         layout.addWidget(gruppe)
@@ -232,17 +292,14 @@ class EinstellungsDialog(QDialog):
 
     def _fuelle(self, e: Einstellungen) -> None:
         d = e.datenbank
-        self.e_server.setText(d.server)
-        self.e_port.setValue(d.port)
-        self.e_datenbank.setText(d.datenbankname)
-        self.e_benutzer.setText(d.benutzer)
-        self.e_passwort.setText(d.passwort)
-        self.e_tabelle.setText(d.tabellenname)
-        self.e_feld_symbol.setText(d.feld_symbol)
-        self.e_feld_text.setText(d.feld_funktionstext)
-        self.e_primaer.setText(d.primaerschluessel)
-        self.e_tls.setChecked(d.tls_verwenden)
-        self.e_timeout.setValue(d.verbindungs_timeout_s)
+        self.e_datei.setText(d.dateipfad)
+        self.c_tabelle.setEditText(d.tabellenname)
+        self.c_feld_symbol.setEditText(d.feld_symbol)
+        self.c_feld_text.setEditText(d.feld_funktionstext)
+        self.c_primaer.setEditText(d.primaerschluessel)
+        self.e_timeout.setValue(d.timeout_s)
+        if d.dateipfad.strip() and Path(d.dateipfad.strip()).expanduser().is_file():
+            self._lade_tabellen()
         p = e.pruefung
         self.c_symbole.setChecked(p.doppelte_symbole)
         self.c_texte.setChecked(p.doppelte_funktionstexte)
@@ -259,17 +316,12 @@ class EinstellungsDialog(QDialog):
     def _lese(self) -> Einstellungen:
         e = copy.deepcopy(self._ausgang)
         d = e.datenbank
-        d.server = self.e_server.text().strip()
-        d.port = self.e_port.value()
-        d.datenbankname = self.e_datenbank.text().strip()
-        d.benutzer = self.e_benutzer.text().strip()
-        d.passwort = self.e_passwort.text()
-        d.tabellenname = self.e_tabelle.text().strip()
-        d.feld_symbol = self.e_feld_symbol.text().strip()
-        d.feld_funktionstext = self.e_feld_text.text().strip()
-        d.primaerschluessel = self.e_primaer.text().strip()
-        d.tls_verwenden = self.e_tls.isChecked()
-        d.verbindungs_timeout_s = self.e_timeout.value()
+        d.dateipfad = self.e_datei.text().strip()
+        d.tabellenname = self.c_tabelle.currentText().strip()
+        d.feld_symbol = self.c_feld_symbol.currentText().strip()
+        d.feld_funktionstext = self.c_feld_text.currentText().strip()
+        d.primaerschluessel = self.c_primaer.currentText().strip()
+        d.timeout_s = self.e_timeout.value()
         p = e.pruefung
         p.doppelte_symbole = self.c_symbole.isChecked()
         p.doppelte_funktionstexte = self.c_texte.isChecked()
@@ -325,7 +377,7 @@ class EinstellungsDialog(QDialog):
     def done(self, code: int) -> None:
         if self._test is not None and self._test.laeuft:
             self._test.abbrechen()
-            self._test.warte_auf_ende(self._ausgang.datenbank.verbindungs_timeout_s * 1000 + 2000)
+            self._test.warte_auf_ende(self._ausgang.datenbank.timeout_s * 1000 + 2000)
         super().done(code)
 
 

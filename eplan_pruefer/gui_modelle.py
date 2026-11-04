@@ -12,7 +12,8 @@ from typing import Any, Sequence
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 
-from .modelle import EplanDatensatz, Fehlertyp, Pruefungsfehler
+from .modelle import DatenbankStatus, EplanDatensatz, Fehlertyp, Pruefungsfehler
+from .suchfilter import WildcardFilter
 
 SORTIER_ROLLE = Qt.ItemDataRole.UserRole + 1
 _ZAHLENTEIL = re.compile(r"(\d+)")
@@ -61,7 +62,7 @@ class _TabellenModell(QAbstractTableModel):
 class FehlerModell(_TabellenModell):
     """Fehlerliste: Fehlertyp, Symbol, Funktionstext, Adresse, Seite, Beschreibung."""
 
-    SPALTEN = ("Fehlertyp", "Symbol", "Funktionstext", "Adresse", "Seite", "Beschreibung")
+    SPALTEN = ("Fehlertyp", "Symbol", "Funktionstext", "Adresse", "Seite", "Beschreibung", "Verweis")
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
@@ -81,76 +82,125 @@ class FehlerModell(_TabellenModell):
     def _text(self, zeile: int, spalte: int) -> str:
         f = self._fehler[zeile]
         return (f.fehlertyp.bezeichnung, f.symbol, f.funktionstext, f.adresse,
-                f.seite, f.beschreibung)[spalte]
+                f.seite, f.beschreibung, f.verweis)[spalte]
 
 
-class FehlerFilterModell(QSortFilterProxyModel):
-    """Filtert nach Fehlertyp und Suchtext und sortiert Seitennummern natürlich."""
+class SpaltenFilterModell(QSortFilterProxyModel):
+    """
+    Filtert eine Tabelle je Spalte und über alle Spalten mit Wildcard-Ausdrücken
+    (positiv und negativ, siehe :mod:`suchfilter`) und sortiert Seitennummern natürlich.
+    """
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
-        self._typ: Fehlertyp | None = None
-        self._suchtext = ""
+        self._spaltenfilter: dict[int, WildcardFilter] = {}
+        self._gesamtfilter = WildcardFilter("")
         self.setSortRole(SORTIER_ROLLE)
         self.setDynamicSortFilter(True)
 
     @property
     def filter_aktiv(self) -> bool:
-        return self._typ is not None or bool(self._suchtext)
+        return self._gesamtfilter.aktiv or any(f.aktiv for f in self._spaltenfilter.values())
 
-    def setze_typ(self, typ: Fehlertyp | None) -> None:
-        self._typ = typ
+    def setze_spaltenfilter(self, spalte: int, ausdruck: str) -> None:
+        self._spaltenfilter[spalte] = WildcardFilter(ausdruck)
         self.invalidateFilter()
 
-    def setze_suchtext(self, text: str) -> None:
-        self._suchtext = text.strip().casefold()
+    def setze_gesamtfilter(self, ausdruck: str) -> None:
+        """Gesamtsuche über alle Spalten."""
+        self._gesamtfilter = WildcardFilter(ausdruck)
         self.invalidateFilter()
 
-    def filterAcceptsRow(self, quellzeile: int, quellindex: QModelIndex) -> bool:
-        modell: FehlerModell = self.sourceModel()  # type: ignore[assignment]
-        fehler = modell.fehler_an(quellzeile)
-        if fehler is None:
-            return False
-        if self._typ is not None and fehler.fehlertyp is not self._typ:
-            return False
-        if self._suchtext:
-            heuhaufen = " ".join((fehler.symbol, fehler.funktionstext, fehler.adresse,
-                                  fehler.seite, fehler.beschreibung)).casefold()
-            return self._suchtext in heuhaufen
+    def loesche_filter(self) -> None:
+        self._spaltenfilter.clear()
+        self._gesamtfilter = WildcardFilter("")
+        self.invalidateFilter()
+
+    def _zusatzfilter(self, quellzeile: int) -> bool:
+        """Erweiterungspunkt für weitere Bedingungen (z. B. Fehlertyp)."""
         return True
 
-    def lessThan(self, links: QModelIndex, rechts: QModelIndex) -> bool:
+    def filterAcceptsRow(self, quellzeile: int, quellindex: QModelIndex) -> bool:  # noqa: N802 (Qt-Name)
+        if not self._zusatzfilter(quellzeile):
+            return False
+        modell = self.sourceModel()
+        for spalte, filter_ in self._spaltenfilter.items():
+            if filter_.aktiv and not filter_.trifft(modell.index(quellzeile, spalte).data() or ""):
+                return False
+        if self._gesamtfilter.aktiv:
+            zellen = [modell.index(quellzeile, s).data() or "" for s in range(modell.columnCount())]
+            return self._gesamtfilter.trifft_zeile(zellen)
+        return True
+
+    def lessThan(self, links: QModelIndex, rechts: QModelIndex) -> bool:  # noqa: N802 (Qt-Name)
         a, b = links.data(SORTIER_ROLLE), rechts.data(SORTIER_ROLLE)
         if a is None or b is None:
             return False
         return a < b
 
+    def sichtbare_quellzeilen(self) -> list[int]:
+        """Zeilennummern des Quellmodells in Anzeigereihenfolge."""
+        return [self.mapToSource(self.index(z, 0)).row() for z in range(self.rowCount())]
+
+
+class FehlerFilterModell(SpaltenFilterModell):
+    """Fehlerliste: zusätzlich nach Fehlertyp filterbar."""
+
+    def __init__(self, parent: Any = None) -> None:
+        super().__init__(parent)
+        self._typ: Fehlertyp | None = None
+
+    @property
+    def filter_aktiv(self) -> bool:
+        return self._typ is not None or super().filter_aktiv
+
+    def setze_typ(self, typ: Fehlertyp | None) -> None:
+        self._typ = typ
+        self.invalidateFilter()
+
+    def loesche_filter(self) -> None:
+        self._typ = None
+        super().loesche_filter()
+
+    def _zusatzfilter(self, quellzeile: int) -> bool:
+        modell: FehlerModell = self.sourceModel()  # type: ignore[assignment]
+        fehler = modell.fehler_an(quellzeile)
+        return fehler is not None and (self._typ is None or fehler.fehlertyp is self._typ)
+
     def sichtbare_fehler(self) -> list[Pruefungsfehler]:
         """Die aktuell sichtbaren Fehler in Anzeigereihenfolge."""
         modell: FehlerModell = self.sourceModel()  # type: ignore[assignment]
-        ergebnis = []
-        for zeile in range(self.rowCount()):
-            quelle = self.mapToSource(self.index(zeile, 0))
-            fehler = modell.fehler_an(quelle.row())
-            if fehler is not None:
-                ergebnis.append(fehler)
-        return ergebnis
+        return [f for f in (modell.fehler_an(z) for z in self.sichtbare_quellzeilen()) if f is not None]
 
 
 class DatensatzModell(_TabellenModell):
     """Alle eingelesenen SPS-Datensätze."""
 
     SPALTEN = ("Nr.", "Symbolische Adresse", "Funktionstext", "SPS-Adresse", "Seite",
-               "Seitenname", "BMK (sichtbar)", "Vollständiges BMK", "Fundstelle")
+               "Seitenname", "BMK (sichtbar)", "Vollständiges BMK", "Datenbank", "Fundstelle")
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
         self._daten: list[EplanDatensatz] = []
+        self._status: dict[int, DatenbankStatus] = {}
 
-    def setze_daten(self, daten: Sequence[EplanDatensatz]) -> None:
+    def setze_daten(self, daten: Sequence[EplanDatensatz],
+                    status: dict[int, DatenbankStatus] | None = None) -> None:
         self.beginResetModel()
         self._daten = list(daten)
+        self._status = dict(status or {})
         self.endResetModel()
+
+    def setze_status(self, status: dict[int, DatenbankStatus] | None) -> None:
+        """Ergebnis des Datenbankabgleichs je Datensatz (leer = nicht geprüft)."""
+        self._status = dict(status or {})
+        spalte = self.SPALTEN.index("Datenbank")
+        if self._daten:
+            self.dataChanged.emit(self.index(0, spalte), self.index(len(self._daten) - 1, spalte))
+
+    @property
+    def spalte_datenbank(self) -> int:
+        return self.SPALTEN.index("Datenbank")
 
     def datensatz_an(self, zeile: int) -> EplanDatensatz | None:
         return self._daten[zeile] if 0 <= zeile < len(self._daten) else None
@@ -162,4 +212,6 @@ class DatensatzModell(_TabellenModell):
         d = self._daten[zeile]
         return (str(d.laufende_nummer), d.symbolische_adresse, d.funktionstext, d.sps_adresse,
                 d.seite_anzeige, d.seitenname, d.betriebsmittelkennzeichen,
-                d.vollstaendiges_bmk, d.fundstelle.als_text())[spalte]
+                d.vollstaendiges_bmk,
+                self._status.get(d.laufende_nummer, DatenbankStatus.NICHT_GEPRUEFT).bezeichnung,
+                d.fundstelle.als_text())[spalte]

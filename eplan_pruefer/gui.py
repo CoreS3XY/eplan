@@ -57,7 +57,8 @@ from .gui_dialoge import (
     zeige_information,
     zeige_warnung,
 )
-from .gui_modelle import DatensatzModell, FehlerFilterModell, FehlerModell
+from .gui_filter import FilterKopf
+from .gui_modelle import DatensatzModell, FehlerFilterModell, FehlerModell, SpaltenFilterModell
 from .logging import (
     hole_protokollierer,
     installiere_ausnahmeprotokoll,
@@ -65,6 +66,7 @@ from .logging import (
     setze_stufe,
 )
 from .modelle import (
+    DatenbankStatus,
     EplanDatensatz,
     EplanPrueferFehler,
     Einleseergebnis,
@@ -74,7 +76,8 @@ from .modelle import (
     Pruefungsfehler,
     UebernahmeErgebnis,
 )
-from .pruefer import Pruefmanager, standard_pruefungen
+from .pruefer import Pruefmanager, Textnormalisierer, standard_pruefungen
+from .suchfilter import HILFETEXT
 
 _log = hole_protokollierer("gui")
 
@@ -107,6 +110,8 @@ class Hauptfenster(QMainWindow):
         self._filter_modell = FehlerFilterModell(self)
         self._filter_modell.setSourceModel(self._fehler_modell)
         self._datensatz_modell = DatensatzModell(self)
+        self._datensatz_filter = SpaltenFilterModell(self)
+        self._datensatz_filter.setSourceModel(self._datensatz_modell)
 
         self._baue_aktionen()
         self._baue_menue_und_werkzeugleiste()
@@ -139,6 +144,11 @@ class Hauptfenster(QMainWindow):
         self.a_beenden = aktion("Beenden", self.close, QKeySequence.StandardKey.Quit)
         self.a_pruefen = aktion("Prüfung starten", self._pruefung_starten, "F5",
                                 "Alle aktivierten Prüfungen erneut ausführen")
+        self.a_dbabgleich = QAction("Datenbankabgleich durchführen (optional)", self)
+        self.a_dbabgleich.setCheckable(True)
+        self.a_dbabgleich.setChecked(self._einstellungen.pruefung.datenbankabgleich)
+        self.a_dbabgleich.setStatusTip("Zeigt, ob Symbol samt Funktionstext in der Referenzdatenbank vorhanden sind")
+        self.a_dbabgleich.toggled.connect(self._datenbankabgleich_umschalten)
         self.a_uebernehmen = aktion("In Datenbank übernehmen", self._in_datenbank_uebernehmen, "Ctrl+D",
                                     "Markierte Fehler „nicht in Datenbank vorhanden“ in die Referenz übernehmen")
         self.a_seite = aktion("Seite anzeigen …", self._zeige_fundstelle, "Ctrl+G",
@@ -162,7 +172,7 @@ class Hauptfenster(QMainWindow):
         datei.addSeparator()
         datei.addAction(self.a_beenden)
         pruefung = menue.addMenu("&Prüfung")
-        pruefung.addActions([self.a_pruefen, self.a_seite, self.a_uebernehmen])
+        pruefung.addActions([self.a_pruefen, self.a_dbabgleich, self.a_seite, self.a_uebernehmen])
         pruefung.addSeparator()
         pruefung.addAction(self.a_abbrechen)
         extras = menue.addMenu("&Extras")
@@ -181,17 +191,23 @@ class Hauptfenster(QMainWindow):
         leiste.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(leiste)
 
-    def _baue_tabelle(self, modell: Any, breiten: Sequence[int]) -> QTableView:
+    def _baue_tabelle(self, filtermodell: SpaltenFilterModell, breiten: Sequence[int]) -> QTableView:
+        """Tabelle mit Filterzeile im Kopf (ein Wildcard-Filter je Spalte, positiv und negativ)."""
         tabelle = QTableView()
-        tabelle.setModel(modell)
+        kopf = FilterKopf(tabelle)
+        tabelle.setHorizontalHeader(kopf)
+        tabelle.setModel(filtermodell)
+        kopf.erzeuge_filterfelder(filtermodell.columnCount())
+        kopf.filter_geaendert.connect(
+            lambda spalte, text: (filtermodell.setze_spaltenfilter(spalte, text), self._aktualisiere_zaehler()))
         tabelle.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         tabelle.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         tabelle.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         tabelle.setAlternatingRowColors(True)
         tabelle.setSortingEnabled(True)
+        tabelle.sortByColumn(-1, Qt.SortOrder.AscendingOrder)       # Start in Dateireihenfolge, nicht absteigend
         tabelle.setWordWrap(False)
         tabelle.verticalHeader().setVisible(False)
-        tabelle.horizontalHeader().setStretchLastSection(True)
         for spalte, breite in enumerate(breiten):
             tabelle.setColumnWidth(spalte, breite)
         return tabelle
@@ -203,19 +219,17 @@ class Hauptfenster(QMainWindow):
         self.l_hinweis.setStyleSheet(
             "QLabel { background: palette(alternate-base); border: 1px solid palette(mid); padding: 6px; }")
 
-        # -- Fehlerliste mit Filter
+        # -- Fehlerliste mit Filtern
         self.c_typ = QComboBox()
         self.c_typ.addItem("Alle Fehlertypen", None)
         for typ in Fehlertyp:
             self.c_typ.addItem(typ.bezeichnung, typ)
         self.c_typ.currentIndexChanged.connect(
             lambda _i: (self._filter_modell.setze_typ(self.c_typ.currentData()), self._aktualisiere_zaehler()))
-        self.e_suche = QLineEdit()
-        self.e_suche.setPlaceholderText("Suchen in Symbol, Funktionstext, Adresse, Seite, Beschreibung …")
-        self.e_suche.setClearButtonEnabled(True)
-        self.e_suche.textChanged.connect(
-            lambda text: (self._filter_modell.setze_suchtext(text), self._aktualisiere_zaehler()))
+        self.e_suche = self._baue_gesamtsuche(self._filter_modell)
         self.l_zaehler = QLabel()
+        self.b_filter_zuruecksetzen = QPushButton("Filter zurücksetzen")
+        self.b_filter_zuruecksetzen.clicked.connect(self._fehlerfilter_zuruecksetzen)
         self.b_uebernehmen = QPushButton("In Datenbank übernehmen")
         self.b_uebernehmen.clicked.connect(self._in_datenbank_uebernehmen)
         self.b_seite = QPushButton("Seite anzeigen …")
@@ -225,11 +239,11 @@ class Hauptfenster(QMainWindow):
         filterzeile.addWidget(self.c_typ)
         filterzeile.addWidget(self.e_suche, 1)
         filterzeile.addWidget(self.l_zaehler)
+        filterzeile.addWidget(self.b_filter_zuruecksetzen)
         filterzeile.addWidget(self.b_seite)
         filterzeile.addWidget(self.b_uebernehmen)
 
-        self.t_fehler = self._baue_tabelle(self._filter_modell, (190, 160, 240, 90, 70, 420))
-        self.t_fehler.sortByColumn(-1, Qt.SortOrder.AscendingOrder)
+        self.t_fehler = self._baue_tabelle(self._filter_modell, (190, 160, 240, 90, 70, 360, 420))
         self.t_fehler.doubleClicked.connect(lambda _i: self._zeige_fundstelle())
         self.t_fehler.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.t_fehler.customContextMenuRequested.connect(self._kontextmenue)
@@ -241,13 +255,29 @@ class Hauptfenster(QMainWindow):
         fl.addLayout(filterzeile)
         fl.addWidget(self.t_fehler, 1)
 
-        self.t_daten = self._baue_tabelle(self._datensatz_modell, (50, 170, 240, 90, 70, 150, 140, 140, 300))
+        # -- Datensätze mit Filtern
+        self.e_suche_daten = self._baue_gesamtsuche(self._datensatz_filter)
+        self.l_zaehler_daten = QLabel()
+        self.b_daten_filter_zuruecksetzen = QPushButton("Filter zurücksetzen")
+        self.b_daten_filter_zuruecksetzen.clicked.connect(self._datenfilter_zuruecksetzen)
+        datenzeile = QHBoxLayout()
+        datenzeile.addWidget(self.e_suche_daten, 1)
+        datenzeile.addWidget(self.l_zaehler_daten)
+        datenzeile.addWidget(self.b_daten_filter_zuruecksetzen)
+
+        self.t_daten = self._baue_tabelle(self._datensatz_filter, (50, 170, 240, 90, 70, 150, 140, 140, 190, 300))
         self.t_daten.doubleClicked.connect(lambda _i: self._zeige_fundstelle())
         self.t_daten.selectionModel().selectionChanged.connect(lambda *_: self._aktualisiere_details())
 
+        datenseite = QWidget()
+        dl = QVBoxLayout(datenseite)
+        dl.setContentsMargins(0, 4, 0, 0)
+        dl.addLayout(datenzeile)
+        dl.addWidget(self.t_daten, 1)
+
         self.tabs = QTabWidget()
         self.tabs.addTab(fehlerseite, "Fehlerliste")
-        self.tabs.addTab(self.t_daten, "Eingelesene Datensätze")
+        self.tabs.addTab(datenseite, "Eingelesene Datensätze")
         self.tabs.currentChanged.connect(lambda _i: (self._aktualisiere_details(), self._aktualisiere_aktionen()))
 
         # -- Fundstelle
@@ -281,6 +311,25 @@ class Hauptfenster(QMainWindow):
         layout.addWidget(self.l_hinweis)
         layout.addWidget(teiler, 1)
         self.setCentralWidget(zentrum)
+
+    def _baue_gesamtsuche(self, filtermodell: SpaltenFilterModell) -> QLineEdit:
+        """Suchfeld über alle Spalten (Wildcards, positiv und negativ)."""
+        feld = QLineEdit()
+        feld.setPlaceholderText("Gesamtsuche in allen Spalten …  z. B.  Motor*;!*Stop")
+        feld.setToolTip(HILFETEXT)
+        feld.setClearButtonEnabled(True)
+        feld.textChanged.connect(
+            lambda text: (filtermodell.setze_gesamtfilter(text), self._aktualisiere_zaehler()))
+        return feld
+
+    def _fehlerfilter_zuruecksetzen(self) -> None:
+        self.c_typ.setCurrentIndex(0)
+        self.e_suche.clear()
+        self.t_fehler.horizontalHeader().loesche_filterfelder()
+
+    def _datenfilter_zuruecksetzen(self) -> None:
+        self.e_suche_daten.clear()
+        self.t_daten.horizontalHeader().loesche_filterfelder()
 
     def _baue_statusleiste(self) -> None:
         leiste = QStatusBar()
@@ -319,6 +368,7 @@ class Hauptfenster(QMainWindow):
         hat_fehler = self._bericht is not None and bool(self._bericht.fehler)
         self.a_oeffnen.setEnabled(frei)
         self.a_ordner.setEnabled(frei)
+        self.a_dbabgleich.setEnabled(frei)
         self.a_pruefen.setEnabled(frei and hat_daten)
         self.a_csv.setEnabled(frei and hat_fehler)
         self.a_xlsx.setEnabled(frei and hat_fehler)
@@ -338,6 +388,11 @@ class Hauptfenster(QMainWindow):
         sichtbar = self._filter_modell.rowCount()
         self.l_zaehler.setText(f"{sichtbar} von {gesamt} Fehlern" if self._filter_modell.filter_aktiv
                                else f"{gesamt} Fehler")
+        gesamt_daten = self._datensatz_modell.rowCount()
+        sichtbar_daten = self._datensatz_filter.rowCount()
+        self.l_zaehler_daten.setText(
+            f"{sichtbar_daten} von {gesamt_daten} Datensätzen" if self._datensatz_filter.filter_aktiv
+            else f"{gesamt_daten} Datensätze")
 
     def _aktualisiere_zusammenfassung(self) -> None:
         teile = []
@@ -345,6 +400,9 @@ class Hauptfenster(QMainWindow):
             teile.append(f"{len(self._ergebnis.datensaetze)} Datensätze")
         if self._bericht is not None:
             teile.append(f"{len(self._bericht.fehler)} Fehler")
+            if self._bericht.datenbankstatus:
+                vorhanden = sum(1 for s in self._bericht.datenbankstatus.values() if s is DatenbankStatus.VORHANDEN)
+                teile.append(f"Datenbank: {vorhanden} von {len(self._bericht.datenbankstatus)} vorhanden")
         self.l_zusammenfassung.setText(" · ".join(teile))
 
     def _zeige_fortschritt(self, meldung: str, aktuell: int, gesamt: int) -> None:
@@ -376,7 +434,7 @@ class Hauptfenster(QMainWindow):
         else:
             index = self.t_daten.currentIndex()
             if index.isValid():
-                return self._datensatz_modell.datensatz_an(index.row()), None
+                return self._datensatz_modell.datensatz_an(self._datensatz_filter.mapToSource(index).row()), None
         return None, None
 
     def _aktualisiere_details(self) -> None:
@@ -391,11 +449,7 @@ class Hauptfenster(QMainWindow):
         self.d_name.setText(datensatz.seitenname or "–")
         self.d_referenz.setText(datensatz.seitenreferenz or "–")
         self.d_fundstelle.setText(datensatz.fundstelle.als_text())
-        if fehler is not None and fehler.bezug is not None:
-            self.d_bezug.setText(f"Erste Verwendung auf Seite {fehler.bezug.seite_ausfuehrlich} – "
-                                 f"{fehler.bezug.fundstelle.als_text()}")
-        else:
-            self.d_bezug.setText("–")
+        self.d_bezug.setText(fehler.verweis if fehler is not None and fehler.verweis else "–")
 
     def _kontextmenue(self, position: QPoint) -> None:
         menue = QMenu(self)
@@ -471,7 +525,7 @@ class Hauptfenster(QMainWindow):
     def _nach_einlesen(self, ergebnis: Einleseergebnis) -> None:
         self._ergebnis = ergebnis
         self._bericht = None
-        self._datensatz_modell.setze_daten(ergebnis.datensaetze)
+        self._datensatz_modell.setze_daten(ergebnis.datensaetze)          # Datenbankspalte: „–" (nicht geprüft)
         self._fehler_modell.setze_fehler([])
         self._aktualisiere_zaehler()
         self._aktualisiere_zusammenfassung()
@@ -505,7 +559,7 @@ class Hauptfenster(QMainWindow):
         verwalter = Pruefmanager(standard_pruefungen(pe), pe.gross_kleinschreibung_beachten)
         referenz: ReferenzRepository | None = None
         if pe.datenbankabgleich and db.ist_vollstaendig:
-            referenz = erzeuge_repository(db)
+            referenz = erzeuge_repository(db, Textnormalisierer(pe.gross_kleinschreibung_beachten).text)
         daten = list(self._ergebnis.datensaetze)
         self._starte("Prüfung",
                      lambda melde, abbruch: verwalter.pruefe(daten, referenz, melde, abbruch),
@@ -514,6 +568,7 @@ class Hauptfenster(QMainWindow):
     def _nach_pruefung(self, bericht: Pruefbericht) -> None:
         self._bericht = bericht
         self._fehler_modell.setze_fehler(bericht.fehler)
+        self._datensatz_modell.setze_status(bericht.datenbankstatus)
         self._aktualisiere_zaehler()
         self._aktualisiere_zusammenfassung()
         self._aktualisiere_details()
@@ -600,9 +655,10 @@ class Hauptfenster(QMainWindow):
             vorschau += f"\n  … und {len(paare) - 8} weitere"
         if not stelle_frage(self, "In Datenbank übernehmen",
                             f"{len(paare)} Datensatz/-sätze in die Tabelle „{db.tabellenname}“ der "
-                            f"Datenbank „{db.datenbankname}“ übernehmen?\n\n{vorschau}"):
+                            f"Datenbank „{Path(db.dateipfad).name}“ übernehmen?\n\n{vorschau}"):
             return
-        repository = erzeuge_repository(db)
+        repository = erzeuge_repository(
+            db, Textnormalisierer(self._einstellungen.pruefung.gross_kleinschreibung_beachten).text)
         self._starte("Übernahme in die Datenbank",
                      lambda _melde, _abbruch: repository.uebernehmen(paare, False),
                      lambda ergebnisse: self._nach_uebernahme(repository, ergebnisse))
@@ -640,6 +696,19 @@ class Hauptfenster(QMainWindow):
 
     # ---------------------------------------------------------------- Extras --
 
+    def _datenbankabgleich_umschalten(self, aktiv: bool) -> None:
+        """Menüschalter „Datenbankabgleich durchführen (optional)"."""
+        if self._einstellungen.pruefung.datenbankabgleich == aktiv:
+            return
+        self._einstellungen.pruefung.datenbankabgleich = aktiv
+        try:
+            self._verwalter.speichern(self._einstellungen)
+        except EplanPrueferFehler as fehler:
+            _log.warning("Einstellung nicht gespeichert: %s", fehler)
+        _log.info("Datenbankabgleich %s", "aktiviert" if aktiv else "deaktiviert")
+        if self._ergebnis is not None and self._ergebnis.datensaetze and not self.beschaeftigt:
+            self._pruefung_starten()
+
     def _einstellungen_oeffnen(self) -> None:
         dialog = EinstellungsDialog(self._einstellungen, self._verwalter.pfad, self._protokollpfad, self)
         if dialog.exec() != EinstellungsDialog.DialogCode.Accepted:
@@ -654,6 +723,9 @@ class Hauptfenster(QMainWindow):
             zeige_fehler(self, "Einstellungen", str(fehler))
             return
         self._einstellungen = neu
+        self.a_dbabgleich.blockSignals(True)
+        self.a_dbabgleich.setChecked(neu.pruefung.datenbankabgleich)
+        self.a_dbabgleich.blockSignals(False)
         setze_stufe(neu.allgemein.protokollstufe)
         self._status("Einstellungen gespeichert.")
         if self._ergebnis is not None and self._ergebnis.datensaetze and stelle_frage(

@@ -95,7 +95,7 @@ Wenn die Projektdateien nicht direkt lesbar sind, ist der robuste Weg, EPLAN die
 | Aufgabe | Wahl | Begründung |
 |---|---|---|
 | GUI | **PyQt6** | Moderne Oberfläche, Model/View, Threads; läuft unter Windows/Linux/macOS |
-| MySQL | **mysql-connector-python** | Offizieller Oracle-Treiber, reines Python (keine Compiler nötig), unterstützt MariaDB |
+| Datenbank | **sqlite3** (Standardbibliothek) | Referenzdatenbank ist eine SQLite-Datei (`*.db`); keine Installation, kein Server |
 | XML | **lxml** | Stream-Parser mit Zeilennummern (für „Sprung zur Fundstelle"), abschaltbare Entitätsauflösung |
 | Excel | **openpyxl** | Lesen und Schreiben von `.xlsx` ohne Excel-Installation |
 | ZIP/GZIP/SQLite/CSV | Standardbibliothek | keine zusätzliche Abhängigkeit |
@@ -110,9 +110,10 @@ Wenn die Projektdateien nicht direkt lesbar sind, ist der robuste Weg, EPLAN die
 | Manipulierte/riesige Archive (Zip-Bombe) | Speicher-/Plattenverbrauch | Limits für Dateianzahl und -größe (1 GiB je Datei, 4 GiB gesamt, 100 000 Dateien, Verschachtelungstiefe 3) |
 | XML-Angriffe (XXE) | Dateizugriff/Netzwerk durch Entitäten | Entitätsauflösung und Netzwerkzugriff abgeschaltet (getestet) |
 | Formelinjektion in Exporten | Excel führt Fremdtexte als Formel aus | XLSX: alle Zellen als Text; CSV: Hochkomma vor `= + - @` |
-| SQL-Injektion | Datenverlust | Werte nur als Parameter; Tabellen-/Feldnamen validiert und quotiert (getestet, inkl. Injektionsversuch) |
-| Passwort im Klartext in der INI-Datei | Mitlesen durch andere Benutzer | wie gefordert in der Konfigurationsdatei; Rechte `0600` unter Linux/macOS; nie im Protokoll (getestet). Auf Windows gelten die Rechte des Benutzerprofils |
-| TLS-Rückfall des Treibers | Passwort unverschlüsselt im Netz | Bei aktivierter TLS-Option bricht die Verbindung ab, wenn der Server kein TLS bietet (getestet) |
-| Kollation der Datenbank beeinflusst Abgleich | `Ä` = `A` o. Ä. | Abgleich in Python mit einheitlicher Normalisierung, nicht per SQL-Kollation |
+| SQL-Injektion | Datenverlust | Werte nur als Parameter; Tabellen-/Feldnamen validiert und in Anführungszeichen gesetzt (getestet, inkl. Injektionsversuch) |
+| Filterausdruck erzeugt Endlos-Backtracking (ReDoS) | Oberfläche friert ein | Wildcards werden **nicht** in reguläre Ausdrücke übersetzt, sondern mit einem Zwei-Zeiger-Matcher ausgewertet (Aufwand ≤ Text × Muster; getestet mit 200 Sternen auf 2000 Zeichen). Ein Regex-Ansatz hatte genau dies im Test bereits blockiert. |
+| Referenzdatei wird beschädigt oder überschrieben | Verlust der Referenz | Lesen immer schreibgeschützt (`mode=ro`); Schreiben nur über „In Datenbank übernehmen", nur in eine vorhandene Datei, je Datensatz eine Transaktion (`BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK`); Sicherungskopie empfohlen |
+| Datei ist von einem anderen Programm gesperrt | Abgleich/Übernahme schlägt fehl | konfigurierbare Wartezeit, verständliche Meldung („von einem anderen Programm gesperrt"), übrige Prüfungen laufen weiter |
+| SQLite vergleicht exakt (Groß-/Kleinschreibung zählt) | „Symbol existiert bereits" meint etwas anderes als der Abgleich | Abgleich **und** Übernahme vergleichen in Python mit derselben Normalisierung (Einstellung „Groß-/Kleinschreibung beachten") |
 | Referenztabelle sehr groß | Speicherbedarf | Die Referenz wird einmal komplett geladen (Zeilen à ≈ 2 Texte); bei mehreren Millionen Zeilen wäre ein abschnittsweiser Abgleich nötig |
 | Modulname `logging.py` | Schattiert die Standardbibliothek, wenn das Paketverzeichnis im Suchpfad liegt | Start nur über `main.py` / `python -m eplan_pruefer` (steht im Moduldokument und in der README) |

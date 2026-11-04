@@ -82,83 +82,42 @@ def zw1_zip(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Echter MariaDB/MySQL-Server für die Datenbank-Integrationstests
+# SQLite-Referenzdatenbank für die Datenbanktests
 # ---------------------------------------------------------------------------
 
-import shutil  # noqa: E402
-import socket  # noqa: E402
-import subprocess  # noqa: E402
-import time  # noqa: E402
+import sqlite3  # noqa: E402
 
 from eplan_pruefer.modelle import DatenbankEinstellungen  # noqa: E402
 
-_SERVER_PROGRAMM = shutil.which("mariadbd") or shutil.which("mysqld")
-_INSTALLER = shutil.which("mariadb-install-db") or shutil.which("mysql_install_db")
-_CLIENT = shutil.which("mariadb") or shutil.which("mysql")
-
-
-def _freier_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture(scope="session")
-def mysql_server(tmp_path_factory):
-    """Startet für die Testsitzung einen eigenen MariaDB-Server; überspringt, falls keiner installiert ist."""
-    if not (_SERVER_PROGRAMM and _INSTALLER and _CLIENT):
-        pytest.skip("Kein lokaler MariaDB/MySQL-Server installiert")
-    basis = tmp_path_factory.mktemp("mysql")
-    daten, socket_pfad, port = basis / "daten", basis / "s.sock", _freier_port()
-    subprocess.run([_INSTALLER, "--no-defaults", "--user=root", f"--datadir={daten}",
-                    "--auth-root-authentication-method=normal"],
-                   check=True, capture_output=True)
-    prozess = subprocess.Popen(
-        [_SERVER_PROGRAMM, "--no-defaults", "--user=root", f"--datadir={daten}",
-         f"--socket={socket_pfad}", f"--port={port}", "--bind-address=127.0.0.1"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        for _ in range(100):
-            if prozess.poll() is not None:
-                pytest.skip("MariaDB-Server ließ sich nicht starten")
-            fertig = subprocess.run([_CLIENT, "--no-defaults", "-uroot", f"--socket={socket_pfad}",
-                                     "-e", "SELECT 1"], capture_output=True)
-            if fertig.returncode == 0:
-                break
-            time.sleep(0.2)
-        else:
-            pytest.skip("MariaDB-Server wurde nicht rechtzeitig bereit")
-        subprocess.run([_CLIENT, "--no-defaults", "-uroot", f"--socket={socket_pfad}", "-e",
-                        "CREATE DATABASE referenz CHARACTER SET utf8mb4; "
-                        "DROP USER IF EXISTS ''@'localhost'; DROP USER IF EXISTS ''@'%'; "
-                        "CREATE USER 'pruefer'@'%' IDENTIFIED BY 'geheim-Pw_1'; "
-                        "CREATE USER 'pruefer'@'localhost' IDENTIFIED BY 'geheim-Pw_1'; "
-                        "GRANT ALL ON referenz.* TO 'pruefer'@'%'; "
-                        "GRANT ALL ON referenz.* TO 'pruefer'@'localhost'; FLUSH PRIVILEGES;"],
-                       check=True, capture_output=True)
-        yield {"port": port, "socket": str(socket_pfad)}
-    finally:
-        prozess.terminate()
-        try:
-            prozess.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            prozess.kill()
+REFERENZ_TABELLE = """
+CREATE TABLE symbole (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL,
+  funktionstext TEXT NOT NULL
+);
+INSERT INTO symbole (symbol, funktionstext) VALUES
+ ('Motor_Start', 'Förderband Start'), ('Motor_Stop', 'Förderband Stop'), ('Lampe', 'Meldeleuchte');
+"""
 
 
 @pytest.fixture
-def datenbank_einstellungen(mysql_server) -> DatenbankEinstellungen:
-    return DatenbankEinstellungen(
-        server="127.0.0.1", port=mysql_server["port"], datenbankname="referenz",
-        benutzer="pruefer", passwort="geheim-Pw_1", tabellenname="symbole",
-        feld_symbol="symbol", feld_funktionstext="funktionstext", primaerschluessel="id",
-        tls_verwenden=False, verbindungs_timeout_s=5)
+def datenbank_einstellungen(tmp_path) -> DatenbankEinstellungen:
+    """Eine echte SQLite-Datei mit der Referenztabelle ``symbole``."""
+    pfad = tmp_path / "referenz.db"
+    verbindung = sqlite3.connect(pfad)
+    verbindung.executescript(REFERENZ_TABELLE)
+    verbindung.commit()
+    verbindung.close()
+    return DatenbankEinstellungen(dateipfad=str(pfad), tabellenname="symbole", feld_symbol="symbol",
+                                  feld_funktionstext="funktionstext", primaerschluessel="id", timeout_s=2)
 
 
 @pytest.fixture
-def sql(mysql_server):
-    """Führt SQL als Administrator aus (zum Vorbereiten der Referenztabelle)."""
-    def ausfuehren(anweisung: str) -> None:
-        subprocess.run([_CLIENT, "--no-defaults", "-uroot", f"--socket={mysql_server['socket']}",
-                        "referenz", "--default-character-set=utf8mb4", "-e", anweisung],
-                       check=True, capture_output=True)
+def sql(datenbank_einstellungen):
+    """Führt SQL direkt auf der Referenzdatei aus (zum Vorbereiten von Sonderfällen)."""
+    def ausfuehren(skript: str) -> None:
+        verbindung = sqlite3.connect(datenbank_einstellungen.dateipfad)
+        verbindung.executescript(skript)
+        verbindung.commit()
+        verbindung.close()
     return ausfuehren

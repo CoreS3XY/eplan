@@ -1,31 +1,40 @@
 """
-datenbank.py – Zugriff auf die MySQL-Referenzdatenbank.
+datenbank.py – Zugriff auf die SQLite-Referenzdatenbank (*.db).
 
-Die Struktur der Referenztabelle (Datenbank, Tabelle, Feldnamen, Primärschlüssel)
-steht nicht im Code, sondern kommt vollständig aus :class:`DatenbankEinstellungen`.
+Die Struktur der Referenztabelle (Datei, Tabelle, Feldnamen, Primärschlüssel) steht nicht im Code,
+sondern kommt vollständig aus :class:`DatenbankEinstellungen`.
 
 Schichtung (Dependency Inversion):
 * :class:`ReferenzRepository` – abstrakte Schnittstelle, von Prüfer und GUI verwendet
-* :class:`MySqlReferenzRepository` – Implementierung für MySQL/MariaDB
+* :class:`SqliteReferenzRepository` – Implementierung für SQLite-Dateien
 
-Weitere Datenbanken (SQL Server, Oracle …) werden durch eine weitere
-Repository-Klasse ergänzt; Prüfer und GUI bleiben unverändert.
+Weitere Datenbanken (MySQL, SQL Server, Oracle …) werden durch eine weitere Repository-Klasse
+ergänzt; Prüfer und GUI bleiben unverändert.
 
-Sicherheit:
+Sicherheit und Datenschutz der Datei:
 * Werte werden ausschließlich als Parameter übergeben (keine SQL-Injection).
-* Tabellen- und Feldnamen (nicht parametrisierbar) werden validiert und mit
-  Backticks quotiert.
-* Passwörter werden nie protokolliert.
+* Tabellen- und Feldnamen (nicht parametrisierbar) werden validiert und in Anführungszeichen gesetzt.
+* Lesen geschieht immer schreibgeschützt (``mode=ro``); nur „In Datenbank übernehmen" öffnet die
+  Datei zum Schreiben, und nur eine bereits vorhandene Datei (es wird nie eine neue angelegt).
+* Jede Übernahme läuft in einer eigenen Transaktion (``BEGIN IMMEDIATE`` … ``COMMIT``).
+
+Vergleich: SQLite vergleicht Text standardmäßig exakt. Damit „Symbol existiert bereits" dasselbe
+bedeutet wie beim Datenbankabgleich der Prüfung, vergleicht das Repository in Python mit derselben
+Normalisierung (Leerzeichen, Groß-/Kleinschreibung laut Einstellung).
 """
 
 from __future__ import annotations
 
+import os
+import sqlite3
 import threading
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
-from .logging import hole_protokollierer, registriere_geheimnis
+from .logging import hole_protokollierer
 from .modelle import (
     DatenbankEinstellungen,
     DatenbankFehler,
@@ -35,17 +44,16 @@ from .modelle import (
     VorgangAbgebrochenFehler,
 )
 
-try:  # Der Treiber ist Pflicht für den Betrieb, soll aber den Import des Moduls nicht verhindern.
-    import mysql.connector as _mysql
-    _TreiberFehler: type[BaseException] = _mysql.Error
-except ImportError:  # pragma: no cover - nur ohne installierten Treiber
-    _mysql = None  # type: ignore[assignment]
-    _TreiberFehler = DatenbankFehler
-
 _log = hole_protokollierer("datenbank")
 
 _BLOCKGROESSE = 5000
-_GANZZAHLTYPEN = {"tinyint", "smallint", "mediumint", "int", "integer", "bigint"}
+_MAX_BEZEICHNERLAENGE = 128
+Normalisierer = Callable[[str], str]
+
+
+def standard_normalisierer(text: str) -> str:
+    """Leerzeichen vereinheitlichen und Groß-/Kleinschreibung ignorieren."""
+    return " ".join((text or "").split()).casefold()
 
 
 class ReferenzRepository(ABC):
@@ -66,23 +74,23 @@ class ReferenzRepository(ABC):
 
     @abstractmethod
     def teste_verbindung(self) -> Verbindungstest:
-        """Prüft Verbindung, Tabelle und Felder gemäß Konfiguration."""
+        """Prüft Datei, Tabelle und Felder gemäß Konfiguration."""
 
 
 def quotiere_bezeichner(name: str, art: str = "Bezeichner") -> str:
     """
-    Prüft einen Tabellen-/Feldnamen aus der Konfiguration und quotiert ihn für MySQL.
+    Prüft einen Tabellen-/Feldnamen aus der Konfiguration und setzt ihn für SQLite in Anführungszeichen.
 
     :raises DatenbankFehler: bei leerem, zu langem oder unzulässigem Namen.
     """
     bereinigt = (name or "").strip()
     if not bereinigt:
         raise DatenbankFehler(f"{art} ist nicht konfiguriert.")
-    if len(bereinigt) > 64:
-        raise DatenbankFehler(f"{art} „{bereinigt[:20]}…“ ist länger als 64 Zeichen.")
-    if any(ord(zeichen) < 32 or zeichen in "`\x7f" for zeichen in bereinigt):
-        raise DatenbankFehler(f"{art} „{bereinigt!r}“ enthält unzulässige Zeichen.")
-    return "`" + bereinigt + "`"
+    if len(bereinigt) > _MAX_BEZEICHNERLAENGE:
+        raise DatenbankFehler(f"{art} „{bereinigt[:20]}…“ ist länger als {_MAX_BEZEICHNERLAENGE} Zeichen.")
+    if any(ord(zeichen) < 32 or zeichen == "\x7f" for zeichen in bereinigt):
+        raise DatenbankFehler(f"{art} „{bereinigt!r}“ enthält Steuerzeichen.")
+    return '"' + bereinigt.replace('"', '""') + '"'
 
 
 def _zu_text(wert: Any) -> str:
@@ -93,275 +101,283 @@ def _zu_text(wert: Any) -> str:
     return str(wert)
 
 
-def _standard_verbinder(einstellungen: DatenbankEinstellungen) -> Any:
-    if _mysql is None:
-        raise DatenbankFehler(
-            "Der MySQL-Treiber fehlt. Bitte „pip install mysql-connector-python“ ausführen.")
-    verbindung = _mysql.connect(
-        host=einstellungen.server.strip(),
-        port=einstellungen.port,
-        user=einstellungen.benutzer.strip(),
-        password=einstellungen.passwort,
-        database=einstellungen.datenbankname.strip(),
-        connection_timeout=einstellungen.verbindungs_timeout_s,
-        charset="utf8mb4",
-        use_pure=True,
-        ssl_disabled=not einstellungen.tls_verwenden,
-        autocommit=False,
-    )
-    # Der Treiber fällt bei fehlendem Server-TLS stillschweigend auf eine unverschlüsselte
-    # Verbindung zurück. Wurde Verschlüsselung verlangt, darf das nicht passieren.
-    if einstellungen.tls_verwenden and not verbindung.is_secure:
-        verbindung.close()
-        raise DatenbankFehler(
-            "Verschlüsselte Verbindung (TLS) ist aktiviert, der Datenbankserver bietet sie aber nicht an. "
-            "Entweder TLS auf dem Server einrichten oder „TLS-Verschlüsselung verwenden“ in den "
-            "Datenbank-Einstellungen abschalten (nur in vertrauenswürdigen Netzen).")
-    return verbindung
+@dataclass(frozen=True, slots=True)
+class Spalte:
+    """Eine Spalte der Referenztabelle (Ergebnis von ``PRAGMA table_info``)."""
+
+    name: str
+    typ: str
+    pflicht: bool
+    standardwert: str | None
+    primaer: int            # 0 = kein Primärschlüssel, sonst Position im Schlüssel
 
 
-class MySqlReferenzRepository(ReferenzRepository):
-    """Referenz-Repository für MySQL und MariaDB."""
+def _beschreibe(fehler: sqlite3.Error, pfad: Path) -> str:
+    text = str(fehler)
+    kleinbuchstaben = text.lower()
+    if "locked" in kleinbuchstaben or "busy" in kleinbuchstaben:
+        return (f"Die Datenbankdatei ist von einem anderen Programm gesperrt: {pfad}. "
+                "Bitte das andere Programm schließen oder später erneut versuchen.")
+    if "not a database" in kleinbuchstaben or "malformed" in kleinbuchstaben:
+        return f"Die Datei ist keine gültige SQLite-Datenbank (oder beschädigt): {pfad}"
+    if "readonly" in kleinbuchstaben or "read-only" in kleinbuchstaben:
+        return f"Die Datenbankdatei ist schreibgeschützt: {pfad}"
+    if "unable to open" in kleinbuchstaben:
+        return f"Die Datenbankdatei kann nicht geöffnet werden: {pfad}"
+    return f"Datenbankfehler: {text}"
 
-    def __init__(self, einstellungen: DatenbankEinstellungen,
-                 verbinder: Callable[[DatenbankEinstellungen], Any] | None = None) -> None:
+
+@contextmanager
+def _oeffne(dateipfad: str, schreibend: bool, timeout_s: int) -> Iterator[sqlite3.Connection]:
+    """Öffnet eine vorhandene SQLite-Datei (lesend oder schreibend) und schließt sie sicher wieder."""
+    text = (dateipfad or "").strip()
+    if not text:
+        raise DatenbankFehler("Es ist keine Datenbankdatei konfiguriert.")
+    pfad = Path(text).expanduser()
+    if not pfad.is_file():
+        raise DatenbankFehler(f"Die Datenbankdatei existiert nicht: {pfad}")
+    modus = "rw" if schreibend else "ro"
+    verbindung = None
+    try:
+        verbindung = sqlite3.connect(f"{pfad.resolve().as_uri()}?mode={modus}", uri=True,
+                                     timeout=max(1, timeout_s), isolation_level=None)
+        yield verbindung
+    except DatenbankFehler:
+        raise
+    except sqlite3.Error as fehler:
+        _log.error("SQLite-Fehler (%s): %s", pfad, fehler)
+        raise DatenbankFehler(_beschreibe(fehler, pfad)) from fehler
+    finally:
+        if verbindung is not None:
+            try:
+                verbindung.close()
+            except sqlite3.Error:
+                pass
+
+
+def _lese_spalten(verbindung: sqlite3.Connection, tabelle: str) -> list[Spalte]:
+    zeilen = verbindung.execute(f"PRAGMA table_info({quotiere_bezeichner(tabelle, 'Tabellenname')})").fetchall()
+    return [Spalte(z[1], z[2] or "", bool(z[3]), z[4], int(z[5])) for z in zeilen]
+
+
+def lese_tabellen(dateipfad: str, timeout_s: int = 5) -> list[str]:
+    """Namen aller Tabellen und Sichten einer SQLite-Datei (für die Auswahl im Einstellungsdialog)."""
+    with _oeffne(dateipfad, False, timeout_s) as verbindung:
+        return [z[0] for z in verbindung.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view') "
+            "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name")]
+
+
+def lese_spaltennamen(dateipfad: str, tabelle: str, timeout_s: int = 5) -> list[str]:
+    """Spaltennamen einer Tabelle (für die Auswahl im Einstellungsdialog)."""
+    with _oeffne(dateipfad, False, timeout_s) as verbindung:
+        return [s.name for s in _lese_spalten(verbindung, tabelle)]
+
+
+@dataclass(slots=True)
+class _Index:
+    """Normalisierte Sicht auf die Referenz für schnelle Existenzprüfungen."""
+
+    symbole: set[str]
+    texte: set[str]
+    paare: set[tuple[str, str]]
+
+    @classmethod
+    def aus(cls, paare: Sequence[tuple[str, str]], normal: Normalisierer) -> "_Index":
+        index = cls(set(), set(), set())
+        for symbol, text in paare:
+            index.merke(symbol, text, normal)
+        return index
+
+    def merke(self, symbol: str, text: str, normal: Normalisierer) -> None:
+        s, t = normal(symbol), normal(text)
+        self.symbole.add(s)
+        self.texte.add(t)
+        self.paare.add((s, t))
+
+    def vorhanden(self, symbol: str, text: str, normal: Normalisierer) -> Vorhandensein:
+        s, t = normal(symbol), normal(text)
+        return Vorhandensein(s in self.symbole, t in self.texte, (s, t) in self.paare)
+
+
+class SqliteReferenzRepository(ReferenzRepository):
+    """Referenz-Repository für eine SQLite-Datei."""
+
+    def __init__(self, einstellungen: DatenbankEinstellungen, normalisierer: Normalisierer | None = None) -> None:
         self._e = einstellungen
-        self._verbinder = verbinder or _standard_verbinder
-        registriere_geheimnis(einstellungen.passwort)
+        self._normal = normalisierer or standard_normalisierer
 
-    # -- Verbindung -----------------------------------------------------------
+    # -- Konfiguration und Struktur ---------------------------------------------------
 
-    def _pruefe_konfiguration(self) -> tuple[str, str, str]:
+    def _namen(self) -> tuple[str, str, str]:
         fehlend = self._e.fehlende_angaben()
         if fehlend:
-            raise DatenbankFehler(
-                "Die Datenbankeinstellungen sind unvollständig: " + ", ".join(fehlend) + ".")
+            raise DatenbankFehler("Die Datenbankeinstellungen sind unvollständig: " + ", ".join(fehlend) + ".")
         return (quotiere_bezeichner(self._e.tabellenname, "Tabellenname"),
                 quotiere_bezeichner(self._e.feld_symbol, "Feldname Symbol"),
                 quotiere_bezeichner(self._e.feld_funktionstext, "Feldname Funktionstext"))
 
-    @contextmanager
-    def _verbindung(self) -> Iterator[Any]:
-        verbindung = None
-        try:
-            _log.debug("Verbinde mit %s:%s, Datenbank %s, Benutzer %s",
-                       self._e.server, self._e.port, self._e.datenbankname, self._e.benutzer)
-            verbindung = self._verbinder(self._e)
-            yield verbindung
-        except DatenbankFehler:
-            raise
-        except _TreiberFehler as fehler:
-            _log.error("Datenbankfehler: %s", fehler)
-            raise DatenbankFehler(self._beschreibe(fehler)) from fehler
-        finally:
-            if verbindung is not None:
-                try:
-                    verbindung.close()
-                except Exception:  # noqa: BLE001 – Schließen darf nie zusätzliche Fehler auslösen
-                    pass
+    def _pruefe_struktur(self, verbindung: sqlite3.Connection) -> dict[str, Spalte]:
+        """Stellt sicher, dass Tabelle und beide Felder existieren; liefert die Spalten (kleingeschrieben)."""
+        spalten = {s.name.casefold(): s for s in _lese_spalten(verbindung, self._e.tabellenname)}
+        if not spalten:
+            vorhanden = [z[0] for z in verbindung.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name")]
+            raise DatenbankFehler(
+                f"Die Tabelle „{self._e.tabellenname}“ existiert in der Datenbank nicht. "
+                f"Vorhandene Tabellen: {', '.join(vorhanden) or '(keine)'}.")
+        for bezeichnung, feld in (("Feld Symbol", self._e.feld_symbol),
+                                  ("Feld Funktionstext", self._e.feld_funktionstext)):
+            if feld.strip().casefold() not in spalten:
+                raise DatenbankFehler(
+                    f"{bezeichnung} „{feld}“ existiert in der Tabelle „{self._e.tabellenname}“ nicht. "
+                    f"Vorhandene Felder: {', '.join(s.name for s in spalten.values())}.")
+        return spalten
 
-    def _beschreibe(self, fehler: BaseException) -> str:
-        nummer = getattr(fehler, "errno", None)
-        text = getattr(fehler, "msg", None) or str(fehler)
-        ziel = f"{self._e.server}:{self._e.port}"
-        return f"Datenbankfehler ({ziel}{', Nr. ' + str(nummer) if nummer else ''}): {text}"
+    def _lese_paare(self, verbindung: sqlite3.Connection, abbruch: threading.Event | None = None) -> list[tuple[str, str]]:
+        tabelle, symbol, text = self._namen()
+        self._pruefe_struktur(verbindung)
+        paare: list[tuple[str, str]] = []
+        cursor = verbindung.execute(f"SELECT {symbol}, {text} FROM {tabelle}")
+        while True:
+            if abbruch is not None and abbruch.is_set():
+                raise VorgangAbgebrochenFehler("Der Vorgang wurde abgebrochen.")
+            block = cursor.fetchmany(_BLOCKGROESSE)
+            if not block:
+                return paare
+            paare.extend((_zu_text(s), _zu_text(t)) for s, t in block)
 
-    # -- Lesen ------------------------------------------------------------------
+    # -- Lesen -------------------------------------------------------------------------
 
     def lade_referenzdaten(self, abbruch: threading.Event | None = None) -> list[tuple[str, str]]:
-        tabelle, symbol, text = self._pruefe_konfiguration()
-        paare: list[tuple[str, str]] = []
-        with self._verbindung() as verbindung:
-            cursor = verbindung.cursor()
-            try:
-                cursor.execute(f"SELECT {symbol}, {text} FROM {tabelle}")
-                while True:
-                    if abbruch is not None and abbruch.is_set():
-                        raise VorgangAbgebrochenFehler("Der Vorgang wurde abgebrochen.")
-                    block = cursor.fetchmany(_BLOCKGROESSE)
-                    if not block:
-                        break
-                    paare.extend((_zu_text(s), _zu_text(t)) for s, t in block)
-            finally:
-                cursor.close()
-        _log.info("Referenzdaten geladen: %d Zeilen aus %s.%s", len(paare),
-                  self._e.datenbankname, self._e.tabellenname)
+        with _oeffne(self._e.dateipfad, False, self._e.timeout_s) as verbindung:
+            paare = self._lese_paare(verbindung, abbruch)
+        _log.info("Referenzdaten geladen: %d Zeilen aus %s, Tabelle %s", len(paare),
+                  Path(self._e.dateipfad).name, self._e.tabellenname)
         return paare
 
     def pruefe_vorhandensein(self, symbol: str, funktionstext: str) -> Vorhandensein:
-        tabelle, feld_symbol, feld_text = self._pruefe_konfiguration()
-        with self._verbindung() as verbindung:
-            cursor = verbindung.cursor()
-            try:
-                return self._vorhandensein(cursor, tabelle, feld_symbol, feld_text,
-                                           symbol, funktionstext)
-            finally:
-                cursor.close()
+        return _Index.aus(self.lade_referenzdaten(), self._normal).vorhanden(symbol, funktionstext, self._normal)
 
-    @staticmethod
-    def _vorhandensein(cursor: Any, tabelle: str, feld_symbol: str, feld_text: str,
-                       symbol: str, funktionstext: str) -> Vorhandensein:
-        cursor.execute(f"SELECT COUNT(*) FROM {tabelle} WHERE {feld_symbol} = %s", (symbol,))
-        hat_symbol = cursor.fetchone()[0] > 0
-        cursor.execute(f"SELECT COUNT(*) FROM {tabelle} WHERE {feld_text} = %s", (funktionstext,))
-        hat_text = cursor.fetchone()[0] > 0
-        cursor.execute(
-            f"SELECT COUNT(*) FROM {tabelle} WHERE {feld_symbol} = %s AND {feld_text} = %s",
-            (symbol, funktionstext))
-        hat_kombination = cursor.fetchone()[0] > 0
-        return Vorhandensein(hat_symbol, hat_text, hat_kombination)
-
-    # -- Schreiben ----------------------------------------------------------------
+    # -- Schreiben ------------------------------------------------------------------------
 
     def uebernehmen(self, paare: Sequence[tuple[str, str]],
                     konflikt_erlauben: bool = False) -> list[UebernahmeErgebnis]:
-        tabelle, feld_symbol, feld_text = self._pruefe_konfiguration()
+        tabelle, feld_symbol, feld_text = self._namen()
         ergebnisse: list[UebernahmeErgebnis] = []
-        with self._verbindung() as verbindung:
-            cursor = verbindung.cursor()
-            try:
-                for symbol, funktionstext in paare:
-                    ergebnis = self._uebernimm_ein_paar(
-                        verbindung, cursor, tabelle, feld_symbol, feld_text,
-                        symbol.strip(), funktionstext.strip(), konflikt_erlauben)
-                    ergebnisse.append(ergebnis)
-                    _log.info("Übernahme in Datenbank: Symbol=%r Funktionstext=%r -> %s (%s)",
-                              symbol, funktionstext,
-                              "gespeichert" if ergebnis.uebernommen else "nicht gespeichert",
-                              ergebnis.meldung)
-            finally:
-                cursor.close()
+        with _oeffne(self._e.dateipfad, True, self._e.timeout_s) as verbindung:
+            spalten = self._pruefe_struktur(verbindung)
+            index = _Index.aus(self._lese_paare(verbindung), self._normal)
+            for symbol, funktionstext in paare:
+                ergebnis = self._uebernimm_ein_paar(verbindung, spalten, index, tabelle, feld_symbol, feld_text,
+                                                    symbol.strip(), funktionstext.strip(), konflikt_erlauben)
+                ergebnisse.append(ergebnis)
+                _log.info("Übernahme in Datenbank: Symbol=%r Funktionstext=%r -> %s (%s)", symbol, funktionstext,
+                          "gespeichert" if ergebnis.uebernommen else "nicht gespeichert", ergebnis.meldung)
         return ergebnisse
 
-    def _uebernimm_ein_paar(self, verbindung: Any, cursor: Any, tabelle: str, feld_symbol: str,
-                            feld_text: str, symbol: str, funktionstext: str,
+    def _uebernimm_ein_paar(self, verbindung: sqlite3.Connection, spalten: dict[str, Spalte], index: _Index,
+                            tabelle: str, feld_symbol: str, feld_text: str, symbol: str, funktionstext: str,
                             konflikt_erlauben: bool) -> UebernahmeErgebnis:
         if not symbol or not funktionstext:
-            return UebernahmeErgebnis(
-                symbol, funktionstext, False,
-                "Symbol und Funktionstext müssen beide ausgefüllt sein.")
+            return UebernahmeErgebnis(symbol, funktionstext, False,
+                                      "Symbol und Funktionstext müssen beide ausgefüllt sein.")
+        vorhanden = index.vorhanden(symbol, funktionstext, self._normal)
+        if vorhanden.kombination:
+            return UebernahmeErgebnis(symbol, funktionstext, False, "Die Kombination ist bereits vorhanden.",
+                                      vorhanden)
+        if (vorhanden.symbol or vorhanden.funktionstext) and not konflikt_erlauben:
+            gruende = []
+            if vorhanden.symbol:
+                gruende.append("Das Symbol existiert bereits (mit anderem Funktionstext)")
+            if vorhanden.funktionstext:
+                gruende.append("Der Funktionstext existiert bereits (mit anderem Symbol)")
+            return UebernahmeErgebnis(symbol, funktionstext, False, "; ".join(gruende) + ".", vorhanden,
+                                      benoetigt_bestaetigung=True)
         try:
-            vorhanden = self._vorhandensein(cursor, tabelle, feld_symbol, feld_text,
-                                            symbol, funktionstext)
-            if vorhanden.kombination:
-                verbindung.rollback()
-                return UebernahmeErgebnis(symbol, funktionstext, False,
-                                          "Die Kombination ist bereits vorhanden.", vorhanden)
-            if (vorhanden.symbol or vorhanden.funktionstext) and not konflikt_erlauben:
-                verbindung.rollback()
-                gruende = []
-                if vorhanden.symbol:
-                    gruende.append("Das Symbol existiert bereits (mit anderem Funktionstext)")
-                if vorhanden.funktionstext:
-                    gruende.append("Der Funktionstext existiert bereits (mit anderem Symbol)")
-                return UebernahmeErgebnis(symbol, funktionstext, False,
-                                          "; ".join(gruende) + ".", vorhanden,
-                                          benoetigt_bestaetigung=True)
+            verbindung.execute("BEGIN IMMEDIATE")
+            spaltennamen, werte = [feld_symbol, feld_text], [symbol, funktionstext]
+            schluessel = self._naechster_schluessel(verbindung, spalten, tabelle)
+            if schluessel is not None:
+                spaltennamen.append(schluessel[0])
+                werte.append(schluessel[1])
+            platzhalter = ", ".join("?" * len(werte))
+            verbindung.execute(f"INSERT INTO {tabelle} ({', '.join(spaltennamen)}) VALUES ({platzhalter})", werte)
+            verbindung.execute("COMMIT")
+        except (DatenbankFehler, sqlite3.Error) as fehler:
+            if verbindung.in_transaction:
+                verbindung.execute("ROLLBACK")
+            if isinstance(fehler, sqlite3.Error):
+                _log.error("Speichern fehlgeschlagen: %s", fehler)
+                meldung = _beschreibe(fehler, Path(self._e.dateipfad))
+            else:
+                meldung = str(fehler)
+            return UebernahmeErgebnis(symbol, funktionstext, False, meldung, vorhanden)
+        index.merke(symbol, funktionstext, self._normal)
+        return UebernahmeErgebnis(symbol, funktionstext, True, "In die Datenbank übernommen.", vorhanden)
 
-            spalten = [feld_symbol, feld_text]
-            werte: list[Any] = [symbol, funktionstext]
-            schluesselwert = self._naechster_schluessel(cursor, tabelle)
-            if schluesselwert is not None:
-                spalten.append(schluesselwert[0])
-                werte.append(schluesselwert[1])
-            platzhalter = ", ".join(["%s"] * len(werte))
-            cursor.execute(
-                f"INSERT INTO {tabelle} ({', '.join(spalten)}) VALUES ({platzhalter})", werte)
-            verbindung.commit()
-            return UebernahmeErgebnis(symbol, funktionstext, True,
-                                      "In die Datenbank übernommen.", vorhanden)
-        except DatenbankFehler as fehler:
-            verbindung.rollback()
-            return UebernahmeErgebnis(symbol, funktionstext, False, str(fehler))
-        except _TreiberFehler as fehler:
-            try:
-                verbindung.rollback()
-            except Exception:  # noqa: BLE001
-                pass
-            _log.error("Speichern fehlgeschlagen: %s", fehler)
-            return UebernahmeErgebnis(symbol, funktionstext, False, self._beschreibe(fehler))
-
-    def _naechster_schluessel(self, cursor: Any, tabelle: str) -> tuple[str, int] | None:
+    def _naechster_schluessel(self, verbindung: sqlite3.Connection, spalten: dict[str, Spalte],
+                              tabelle: str) -> tuple[str, int] | None:
         """
         Ermittelt bei Bedarf einen Primärschlüsselwert.
 
-        * kein/gleich Symbol- oder Textfeld oder AUTO_INCREMENT -> kein eigener Wert nötig
-        * Ganzzahlschlüssel ohne AUTO_INCREMENT -> MAX()+1 (gesperrt bis zum Commit)
-        * sonstiger Schlüsseltyp -> Fehler (kann nicht automatisch vergeben werden)
+        * kein Schlüssel konfiguriert oder Schlüssel = Symbol-/Textfeld -> kein Zusatzwert
+        * Spalte mit Standardwert -> die Datenbank vergibt ihn
+        * Ganzzahlschlüssel -> MAX()+1 (innerhalb der Schreibtransaktion)
+        * anderer Typ -> Fehler: kann nicht automatisch vergeben werden
         """
         name = self._e.primaerschluessel.strip()
         if not name or name.casefold() in (self._e.feld_symbol.strip().casefold(),
                                            self._e.feld_funktionstext.strip().casefold()):
             return None
-        quotiert = quotiere_bezeichner(name, "Primärschlüssel")
-        cursor.execute(
-            "SELECT EXTRA, DATA_TYPE FROM information_schema.COLUMNS "
-            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
-            (self._e.tabellenname.strip(), name))
-        zeile = cursor.fetchone()
-        if zeile is None:
+        spalte = spalten.get(name.casefold())
+        if spalte is None:
             raise DatenbankFehler(f"Der Primärschlüssel „{name}“ existiert in der Tabelle nicht.")
-        extra, datentyp = _zu_text(zeile[0]).lower(), _zu_text(zeile[1]).lower()
-        if "auto_increment" in extra or "generated" in extra:
+        if spalte.standardwert is not None:
             return None
-        if datentyp not in _GANZZAHLTYPEN:
+        if "INT" not in spalte.typ.upper():
             raise DatenbankFehler(
-                f"Der Primärschlüssel „{name}“ ({datentyp}) hat kein AUTO_INCREMENT; "
-                "ein Wert kann nicht automatisch vergeben werden.")
-        cursor.execute(f"SELECT COALESCE(MAX({quotiert}), 0) + 1 FROM {tabelle} FOR UPDATE")
-        return quotiert, int(cursor.fetchone()[0])
+                f"Der Primärschlüssel „{name}“ ({spalte.typ or 'ohne Typ'}) ist keine Ganzzahl und hat keinen "
+                "Standardwert; ein Wert kann nicht automatisch vergeben werden.")
+        quotiert = quotiere_bezeichner(name, "Primärschlüssel")
+        wert = verbindung.execute(f"SELECT COALESCE(MAX({quotiert}), 0) + 1 FROM {tabelle}").fetchone()[0]
+        return quotiert, int(wert)
 
-    # -- Verbindungstest ------------------------------------------------------------
+    # -- Verbindungstest -------------------------------------------------------------------------
 
     def teste_verbindung(self) -> Verbindungstest:
         meldungen: list[str] = []
         try:
-            tabelle, feld_symbol, feld_text = self._pruefe_konfiguration()
-            with self._verbindung() as verbindung:
-                cursor = verbindung.cursor()
-                try:
-                    cursor.execute("SELECT VERSION()")
-                    meldungen.append(f"Verbindung hergestellt (Server {_zu_text(cursor.fetchone()[0])}).")
-                    cursor.execute(
-                        "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_KEY, EXTRA FROM information_schema.COLUMNS "
-                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
-                        (self._e.tabellenname.strip(),))
-                    spalten = {_zu_text(z[0]).casefold(): z for z in cursor.fetchall()}
-                    if not spalten:
-                        return Verbindungstest(False, (*meldungen,
-                            f"Die Tabelle „{self._e.tabellenname}“ existiert nicht oder ist nicht sichtbar.",))
-                    meldungen.append(f"Tabelle „{self._e.tabellenname}“ gefunden.")
-                    ok = True
-                    angaben = [("Feld Symbol", self._e.feld_symbol),
-                               ("Feld Funktionstext", self._e.feld_funktionstext)]
-                    if self._e.primaerschluessel.strip():
-                        angaben.append(("Primärschlüssel", self._e.primaerschluessel))
-                    for bezeichnung, feldname in angaben:
-                        if feldname.strip().casefold() in spalten:
-                            meldungen.append(f"{bezeichnung} „{feldname}“ vorhanden.")
-                        else:
-                            ok = False
-                            meldungen.append(f"{bezeichnung} „{feldname}“ existiert NICHT in der Tabelle.")
-                    if not ok:
-                        return Verbindungstest(False, tuple(meldungen))
-                    cursor.execute(f"SELECT COUNT(*) FROM {tabelle}")
-                    meldungen.append(f"Lesezugriff möglich ({cursor.fetchone()[0]} Datensätze in der Referenz).")
-                    pk = spalten.get(self._e.primaerschluessel.strip().casefold())
-                    if pk is not None and self._e.primaerschluessel.strip().casefold() not in (
-                            feld_symbol.strip("`").casefold(), feld_text.strip("`").casefold()):
-                        if "auto_increment" not in _zu_text(pk[3]).lower() \
-                                and _zu_text(pk[1]).lower() not in _GANZZAHLTYPEN:
-                            meldungen.append(
-                                "WARNUNG: Der Primärschlüssel hat weder AUTO_INCREMENT noch einen "
-                                "Ganzzahltyp – „In Datenbank übernehmen“ wird nicht möglich sein.")
-                    return Verbindungstest(True, tuple(meldungen))
-                finally:
-                    cursor.close()
+            tabelle, _, _ = self._namen()
+            pfad = Path(self._e.dateipfad.strip()).expanduser()
+            with _oeffne(self._e.dateipfad, False, self._e.timeout_s) as verbindung:
+                version = verbindung.execute("SELECT sqlite_version()").fetchone()[0]
+                meldungen.append(f"Datenbankdatei gefunden ({pfad.stat().st_size:,} Bytes, SQLite {version}).".replace(",", "."))
+                spalten = self._pruefe_struktur(verbindung)
+                meldungen.append(f"Tabelle „{self._e.tabellenname}“ gefunden.")
+                meldungen.append(f"Feld Symbol „{self._e.feld_symbol}“ und Feld Funktionstext "
+                                 f"„{self._e.feld_funktionstext}“ vorhanden.")
+                anzahl = verbindung.execute(f"SELECT COUNT(*) FROM {tabelle}").fetchone()[0]
+                meldungen.append(f"Lesezugriff möglich ({anzahl} Datensätze in der Referenz).")
+                name = self._e.primaerschluessel.strip()
+                if name:
+                    if name.casefold() not in spalten:
+                        return Verbindungstest(False, (*meldungen, f"Primärschlüssel „{name}“ existiert NICHT in der Tabelle."))
+                    spalte = spalten[name.casefold()]
+                    if (name.casefold() not in (self._e.feld_symbol.strip().casefold(),
+                                                self._e.feld_funktionstext.strip().casefold())
+                            and spalte.standardwert is None and "INT" not in spalte.typ.upper()):
+                        meldungen.append("WARNUNG: Der Primärschlüssel ist keine Ganzzahl und hat keinen Standardwert – "
+                                         "„In Datenbank übernehmen“ wird nicht möglich sein.")
+                if not os.access(pfad, os.W_OK):
+                    meldungen.append("HINWEIS: Die Datei ist schreibgeschützt – „In Datenbank übernehmen“ ist nicht möglich.")
+            return Verbindungstest(True, tuple(meldungen))
         except DatenbankFehler as fehler:
             meldungen.append(str(fehler))
             return Verbindungstest(False, tuple(meldungen))
 
 
-def erzeuge_repository(einstellungen: DatenbankEinstellungen) -> ReferenzRepository:
+def erzeuge_repository(einstellungen: DatenbankEinstellungen,
+                       normalisierer: Normalisierer | None = None) -> ReferenzRepository:
     """Fabrikfunktion; hier wird bei weiteren Datenbanktypen nach Einstellung verzweigt."""
-    return MySqlReferenzRepository(einstellungen)
+    return SqliteReferenzRepository(einstellungen, normalisierer)

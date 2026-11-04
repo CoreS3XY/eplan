@@ -217,6 +217,28 @@ class Pruefungsfehler:
     def seite(self) -> str:
         return self.datensatz.seite_anzeige
 
+    @property
+    def verweis(self) -> str:
+        """Fundstelle der ersten Verwendung bei Duplikaten, sonst leer."""
+        if self.bezug is None:
+            return ""
+        return (f"Erste Verwendung auf Seite {self.bezug.seite_ausfuehrlich} – "
+                f"{self.bezug.fundstelle.als_text()}")
+
+
+class DatenbankStatus(Enum):
+    """Ergebnis des (optionalen) Datenbankabgleichs für einen Datensatz."""
+
+    VORHANDEN = "In Datenbank vorhanden"
+    SYMBOL_FEHLT = "Symbol fehlt in Datenbank"
+    FUNKTIONSTEXT_FEHLT = "Funktionstext fehlt in Datenbank"
+    KOMBINATION_ABWEICHEND = "Kombination weicht ab"
+    NICHT_GEPRUEFT = "–"
+
+    @property
+    def bezeichnung(self) -> str:
+        return self.value
+
 
 @dataclass(slots=True)
 class Pruefbericht:
@@ -226,6 +248,8 @@ class Pruefbericht:
     ausgefuehrt: list[str] = field(default_factory=list)            # Bezeichnungen
     uebersprungen: dict[str, str] = field(default_factory=dict)     # Bezeichnung -> Grund
     anzahl_datensaetze: int = 0
+    #: Ergebnis des Datenbankabgleichs je Datensatz (Schlüssel = laufende Nummer); leer, wenn nicht geprüft
+    datenbankstatus: dict[int, DatenbankStatus] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -315,26 +339,19 @@ STANDARD_FELDZUORDNUNG: dict[str, tuple[str, ...]] = {
 
 @dataclass(slots=True)
 class DatenbankEinstellungen:
-    """Verbindungs- und Strukturangaben der Referenzdatenbank (nichts davon ist im Code fest)."""
+    """Lage und Struktur der SQLite-Referenzdatenbank (nichts davon ist im Code fest)."""
 
-    server: str = "localhost"
-    port: int = 3306
-    datenbankname: str = ""
-    benutzer: str = ""
-    passwort: str = ""
+    dateipfad: str = ""                 # SQLite-Datei, z. B. C:\\Daten\\symbole.db
     tabellenname: str = ""
     feld_symbol: str = ""
     feld_funktionstext: str = ""
     primaerschluessel: str = ""
-    tls_verwenden: bool = True
-    verbindungs_timeout_s: int = 10
+    timeout_s: int = 10                 # Wartezeit, wenn die Datei von einem anderen Programm gesperrt ist
 
     def fehlende_angaben(self) -> list[str]:
-        """Namen der Pflichtangaben, die noch fehlen (Passwort darf leer sein)."""
+        """Namen der Pflichtangaben, die noch fehlen."""
         pflicht = {
-            "Datenbankserver": self.server,
-            "Datenbankname": self.datenbankname,
-            "Benutzer": self.benutzer,
+            "Datenbankdatei": self.dateipfad,
             "Tabellenname": self.tabellenname,
             "Feldname Symbol": self.feld_symbol,
             "Feldname Funktionstext": self.feld_funktionstext,
@@ -354,7 +371,7 @@ class PruefEinstellungen:
     doppelte_funktionstexte: bool = True
     doppelte_adressen: bool = True
     platzhalter: bool = True
-    datenbankabgleich: bool = True
+    datenbankabgleich: bool = False       # optional
     gross_kleinschreibung_beachten: bool = False
     automatisch_pruefen: bool = True
 

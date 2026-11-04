@@ -165,12 +165,17 @@ def test_datenbankabgleich_ohne_referenz_wird_uebersprungen():
 
 def test_datenbank_nicht_erreichbar_stoppt_nicht_die_anderen_pruefungen():
     ref = AttrappenReferenz([], fehler=DatenbankFehler("Server nicht erreichbar"))
-    bericht = Pruefmanager(standard_pruefungen(PruefEinstellungen())).pruefe(
+    bericht = Pruefmanager(standard_pruefungen(PruefEinstellungen(datenbankabgleich=True))).pruefe(
         [baue_datensatz("A?", "T", "E0.0", nummer=1), baue_datensatz("A?", "T", "E0.0", nummer=2)], referenz=ref)
     assert bericht.uebersprungen["Datenbankabgleich"] == "Server nicht erreichbar"
     typen = {f.fehlertyp for f in bericht.fehler}
     assert {Fehlertyp.DOPPELTES_SYMBOL, Fehlertyp.DOPPELTER_FUNKTIONSTEXT,
             Fehlertyp.DOPPELTE_ADRESSE, Fehlertyp.PLATZHALTER} <= typen
+
+
+def test_datenbankabgleich_ist_standardmaessig_aus():
+    assert [type(p).__name__ for p in standard_pruefungen(PruefEinstellungen())] == [
+        "DoppelteSymbolePruefung", "DoppelteFunktionstextePruefung", "DoppelteAdressenPruefung", "PlatzhalterPruefung"]
 
 
 def test_einzelne_pruefungen_abschaltbar():

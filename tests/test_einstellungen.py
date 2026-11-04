@@ -28,10 +28,9 @@ def test_speichern_und_laden_roundtrip(tmp_path):
     verwalter = EinstellungsVerwalter(tmp_path / "unter" / "einstellungen.ini")
     e = Einstellungen()
     d = e.datenbank
-    d.server, d.port, d.datenbankname, d.benutzer = "db.firma.de", 3307, "referenz", "pruefer"
-    d.passwort = "p%w;rt=ä #1"
+    d.dateipfad = "C:\\Daten\\Symbole ä;#1.db"
     d.tabellenname, d.feld_symbol, d.feld_funktionstext, d.primaerschluessel = "Meine Tabelle", "sym", "txt", "id"
-    d.tls_verwenden = False
+    d.timeout_s = 30
     e.pruefung.doppelte_adressen = False
     e.pruefung.gross_kleinschreibung_beachten = True
     e.allgemein.bevorzugte_sprache = "en_US"
@@ -42,12 +41,25 @@ def test_speichern_und_laden_roundtrip(tmp_path):
         assert oct(os.stat(verwalter.pfad).st_mode & 0o777) == "0o600"
 
 
+def test_alte_mysql_konfiguration_wird_ohne_fehler_gelesen(tmp_path):
+    pfad = tmp_path / "e.ini"
+    pfad.write_text("[datenbank]\nserver = db\nport = 3306\nbenutzer = u\npasswort = geheim\ndatenbankname = d\n"
+                    "tabellenname = symbole\nfeld_symbol = symbol\nfeld_funktionstext = text\nprimaerschluessel = id\n",
+                    encoding="utf-8")
+    d = EinstellungsVerwalter(pfad).laden().datenbank
+    assert (d.tabellenname, d.feld_symbol, d.feld_funktionstext, d.primaerschluessel) == ("symbole", "symbol", "text", "id")
+    assert d.dateipfad == "" and not d.ist_vollstaendig            # Datei muss neu gewählt werden
+    EinstellungsVerwalter(pfad).speichern(EinstellungsVerwalter(pfad).laden())
+    assert "geheim" not in pfad.read_text(encoding="utf-8")          # Passwort verschwindet beim nächsten Speichern
+
+
 def test_ungueltige_werte_fallen_auf_standard_zurueck(tmp_path):
     pfad = tmp_path / "e.ini"
-    pfad.write_text("[datenbank]\nport = abc\nserver = host\ntls_verwenden = vielleicht\n"
-                    "[pruefung]\ndoppelte_symbole = nein\n", encoding="utf-8")
+    pfad.write_text("[datenbank]\ntimeout_s = abc\ndateipfad = x.db\n"
+                    "[pruefung]\ndoppelte_symbole = nein\ndatenbankabgleich = vielleicht\n", encoding="utf-8")
     e = EinstellungsVerwalter(pfad).laden()
-    assert e.datenbank.port == 3306 and e.datenbank.server == "host" and e.datenbank.tls_verwenden is True
+    assert e.datenbank.timeout_s == 10 and e.datenbank.dateipfad == "x.db"
+    assert e.pruefung.datenbankabgleich is False            # Standard: optional, aus
     assert e.pruefung.doppelte_symbole is False
 
 
@@ -59,11 +71,10 @@ def test_defekte_datei_wird_gesichert(tmp_path):
 
 
 @pytest.mark.parametrize("aenderung,meldung", [
-    (lambda e: setattr(e.datenbank, "port", 0), "Port"),
-    (lambda e: setattr(e.datenbank, "tabellenname", "a`b"), "Backticks"),
+    (lambda e: setattr(e.datenbank, "timeout_s", 0), "Timeout"),
+    (lambda e: setattr(e.datenbank, "tabellenname", "a\x00b"), "Steuerzeichen"),
     (lambda e: setattr(e.allgemein, "protokollstufe", "LAUT"), "Protokollstufe"),
     (lambda e: e.feldzuordnung.__setitem__("sps_adresse", ()), "sps_adresse"),
-    (lambda e: setattr(e.datenbank, "passwort", "a\nb"), "Passwort"),
 ])
 def test_ungueltige_einstellungen_werden_abgelehnt(tmp_path, aenderung, meldung):
     e = Einstellungen()

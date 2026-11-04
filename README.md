@@ -8,7 +8,8 @@ und prüft sie auf
 2. doppelte Funktionstexte,
 3. doppelte SPS-Adressen,
 4. Platzhalter (Fragezeichen),
-5. Übereinstimmung mit einer MySQL-Referenzdatenbank (Symbol, Funktionstext, Kombination).
+5. **optional:** Abgleich mit einer SQLite-Referenzdatenbank (`*.db`) – zeigt je Datensatz, ob das Symbol samt
+   Funktionstext dort vorhanden ist (Symbol, Funktionstext, Kombination).
 
 Fehler lassen sich mit Seitennummer, Seitenname und Quellauszug anzeigen, als CSV/Excel exportieren und – soweit
 „nicht in Datenbank vorhanden" – direkt in die Referenzdatenbank übernehmen.
@@ -87,16 +88,19 @@ Kommandozeile: `python main.py [Datei] [--konfiguration PFAD] [--protokollstufe 
 
 ## Erste Schritte
 
-1. **Extras ▸ Einstellungen ▸ Datenbank:** Server, Port, Datenbankname, Benutzer, Passwort, Tabellenname, Feldname
-   Symbol, Feldname Funktionstext und (optional) Primärschlüssel eintragen, **Verbindung testen**, **Speichern**.
-   Der Test prüft Verbindung, Tabelle und Felder. Ohne Datenbankangaben laufen die Prüfungen 1–4, der Abgleich wird
-   mit Hinweis übersprungen.
-   *TLS:* Die Option „TLS-Verschlüsselung verwenden" ist standardmäßig an. Bietet der Server kein TLS, bricht die
-   Verbindung mit einer klaren Meldung ab (kein stiller Rückfall auf unverschlüsselt). Nur in vertrauenswürdigen
-   Netzen abschalten.
+1. **Datenbankabgleich (optional):** *Extras ▸ Einstellungen ▸ Datenbank*: SQLite-Datei (`*.db`) über **Durchsuchen …**
+   wählen – Tabelle und Felder (Symbol, Funktionstext, optional Primärschlüssel) lassen sich danach aus der Datei
+   auswählen –, **Verbindung testen**, **Speichern**. Eingeschaltet wird der Abgleich über *Prüfung ▸ Datenbankabgleich
+   durchführen (optional)* (oder den Reiter „Prüfungen"); er ist standardmäßig **aus**. Ist er an, zeigt die Spalte
+   **Datenbank** der Datensatzliste je Datensatz „In Datenbank vorhanden", „Symbol fehlt in Datenbank",
+   „Funktionstext fehlt in Datenbank" oder „Kombination weicht ab"; abweichende Datensätze erscheinen zusätzlich in der
+   Fehlerliste. Ohne Datenbankangaben laufen die Prüfungen 1–4; der Abgleich wird mit Hinweis übersprungen.
+   Die Datei wird zum Abgleich nur **gelesen**; geschrieben wird ausschließlich über „In Datenbank übernehmen" und nie
+   in eine neu angelegte Datei. Vor dem ersten Übernehmen empfiehlt sich eine Sicherungskopie der `*.db`.
 2. **Datei öffnen** (oder in das Fenster ziehen): `*.elk`, `*.zw1` oder ein Export (`*.csv`, `*.xlsx`, `*.xml`).
    Einlesen und Prüfung laufen im Hintergrund, Esc bricht ab.
-3. **Fehlerliste:** Filter nach Fehlertyp, Suche, Sortierung (Seiten numerisch). Auswahl eines Fehlers zeigt unten
+3. **Fehlerliste:** Filter (siehe unten), Sortierung (Seiten numerisch), Spalte **Verweis** mit der Fundstelle der
+   ersten Verwendung bei Duplikaten. Auswahl eines Fehlers zeigt unten
    Beschreibung, Seitennummer, Seitenname, Seitenreferenz, Fundstelle und – bei Duplikaten – die erste Verwendung.
    **Seite anzeigen** (Doppelklick, Strg+G) öffnet Seite, alle Einträge der Seite und den Quellauszug.
 4. **Export:** *Datei ▸ Fehlerliste als CSV/Excel exportieren*. Spalten: Fehlertyp, Symbol, Funktionstext, Adresse,
@@ -105,14 +109,35 @@ Kommandozeile: `python main.py [Datei] [--konfiguration PFAD] [--protokollstufe 
    **In Datenbank übernehmen** (Strg+D). Das Programm prüft Symbol, Funktionstext und Kombination, fragt bei
    Konflikten nach und prüft danach automatisch erneut.
 
+## Filter
+
+Jede Spalte der Fehlerliste **und** der Datensatzliste hat unter der Überschrift ein Filterfeld; zusätzlich gibt es eine
+**Gesamtsuche** über alle Spalten und (in der Fehlerliste) die Auswahl nach Fehlertyp. **Filter zurücksetzen** löscht alle.
+Der Export berücksichtigt auf Nachfrage nur die sichtbaren Fehler.
+
+| Eingabe | Bedeutung |
+|---|---|
+| `Motor` | enthält „Motor" (ohne Platzhalter immer „enthält") |
+| `Motor*` / `*Stop` / `*Stop*` | beginnt mit / endet mit / enthält |
+| `E0.?` | `?` = genau ein Zeichen (`E0.0`, aber nicht `E0.15`) |
+| `A*;E*` | mehrere Muster mit `;` = ODER |
+| `!E0.*` | **negativ**: Treffer ausschließen |
+| `Motor*;!*Stop` | positiv und negativ kombiniert: beginnt mit „Motor", endet aber nicht auf „Stop" |
+| `!?*` / `?*` | nur leere / nur gefüllte Zellen |
+| `\?` | das Zeichen `?` selbst (Platzhalter-Symbole wie `Motor_?`); ebenso `\*`, `\!`, `\;` |
+
+Groß-/Kleinschreibung spielt keine Rolle. Ein negatives Muster gewinnt immer gegen ein positives. In der Gesamtsuche
+schließt ein negatives Muster die Zeile aus, sobald es in irgendeiner Spalte trifft.
+
 ## Konfiguration und Protokoll
 
 * Konfiguration (INI): Windows `%APPDATA%\EplanPruefer\einstellungen.ini`, sonst `~/.config/eplan_pruefer/einstellungen.ini`
-  (oder `--konfiguration`). Sie wird vom Programm geschrieben; das Passwort steht – wie gefordert – darin, die Datei
-  ist unter Linux/macOS nur für den Benutzer lesbar.
+  (oder `--konfiguration`). Sie wird vom Programm geschrieben und ist unter Linux/macOS nur für den Benutzer lesbar.
+  Eine alte Konfiguration aus der MySQL-Zeit wird weiter gelesen (Tabelle und Feldnamen bleiben); Server, Benutzer und
+  Passwort werden ignoriert und beim nächsten Speichern entfernt – die Datenbankdatei muss neu gewählt werden.
 * Protokoll: Ordner `protokoll` neben der Konfiguration, rotierend (5 × 1 MB). Es protokolliert alle Vorgänge (Öffnen,
-  Einlesen je Teildatei, Prüfungen, Datenbankzugriffe, Übernahmen, Export, Fehler mit Stacktrace); **Passwörter werden
-  maskiert**. Anzeige: *Extras ▸ Protokoll anzeigen*.
+  Einlesen je Teildatei, Prüfungen, Datenbankzugriffe, Übernahmen, Export, Fehler mit Stacktrace); geheime Werte werden
+  maskiert. Anzeige: *Extras ▸ Protokoll anzeigen*.
 
 Eine passende Beispieltabelle steht in [`docs/ARCHITEKTUR.md`](docs/ARCHITEKTUR.md#datenbankmodell); Tabellen- und
 Feldnamen sind frei wählbar.
@@ -135,14 +160,17 @@ eplan/
 │   ├── einstellungen.py       Laden/Speichern der INI-Konfiguration
 │   ├── dateianalyse.py        Strukturanalyse beliebiger Dateien
 │   ├── eplan_parser.py        Container (ZIP/GZIP/Ordner) + Extraktoren (XML/CSV/XLSX/SQLite)
-│   ├── datenbank.py           MySQL-Zugriff (Repository-Schnittstelle + MySQL-Implementierung)
+│   ├── datenbank.py           SQLite-Zugriff (Repository-Schnittstelle + SQLite-Implementierung)
+│   ├── suchfilter.py          Wildcard-Filter (positiv/negativ)
+│   ├── dxf_parser.py          DXF-Seiten (Block-Attribute, Texttabellen)
 │   ├── pruefer.py             Die fünf Prüfungen und der Prüfmanager
 │   ├── export.py              CSV- und Excel-Export
 │   ├── gui.py                 Hauptfenster und Programmstart
 │   ├── gui_dialoge.py         Einstellungen, Seitenansicht, Berichte
-│   ├── gui_modelle.py         Qt-Tabellenmodelle, Filter
+│   ├── gui_modelle.py         Qt-Tabellenmodelle, Spaltenfilter
+│   ├── gui_filter.py          Tabellenkopf mit Filterzeile
 │   └── gui_arbeiter.py        Hintergrund-Threads
-└── tests/                     163 automatische Tests
+└── tests/                     222 automatische Tests
 ```
 
 ## Tests
@@ -152,12 +180,10 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-Die Tests der Datenbankschicht und des Gesamtablaufs laufen gegen einen **echten, automatisch gestarteten
-MariaDB/MySQL-Server** (benötigt `mariadbd` bzw. `mysqld` und `mariadb-install-db` im PATH); fehlt er, werden diese
-Tests übersprungen. Die GUI-Tests laufen ohne Bildschirm (`QT_QPA_PLATFORM=offscreen`).
+Die Datenbanktests laufen gegen **echte SQLite-Dateien** (kein Server nötig), die GUI-Tests ohne Bildschirm
+(`QT_QPA_PLATFORM=offscreen`). Ein Test (schreibgeschützte Datei) wird als Superuser/unter Windows übersprungen.
 
-**Nicht getestet** wurden: Ausführung unter Windows und macOS, ein Lauf gegen MySQL (statt MariaDB) und – mangels
-Beispieldateien – echte `*.elk`/`*.zw1`-Projekte.
+**Nicht getestet** wurden: Ausführung unter Windows und macOS und – mangels Beispieldateien – echte `*.elk`/`*.zw1`-Projekte.
 
 ## Erweiterungsmöglichkeiten
 
@@ -165,7 +191,7 @@ Beispieldateien – echte `*.elk`/`*.zw1`-Projekte.
   Container, Strukturanalyse, Seiten- und Quellenanzeige werden wiederverwendet.
 * **EPLAN-API-Anbindung:** automatischer SPS-Export über `PlcService` (siehe `docs/ANALYSE.md`), Ergebnis wird wie
   jede CSV eingelesen.
-* **SQL Server / Oracle:** weitere Klasse neben `MySqlReferenzRepository` (Schnittstelle `ReferenzRepository`),
-  Auswahl über ein Konfigurationsfeld „Datenbanktyp".
+* **MySQL / SQL Server / Oracle:** weitere Klasse neben `SqliteReferenzRepository` (Schnittstelle `ReferenzRepository`),
+  Auswahl über ein Konfigurationsfeld „Datenbanktyp". Eine frühere MySQL-Umsetzung steht in der Git-Historie.
 * **PDF-Export:** weitere Klasse von `FehlerExporter` und Eintrag in `EXPORTER`.
 * **Auslieferung als `.exe`:** z. B. mit PyInstaller (hier nicht erprobt).

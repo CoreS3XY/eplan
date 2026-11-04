@@ -6,10 +6,8 @@ Die Konfiguration liegt in einer INI-Datei (``configparser``):
 * Windows: ``%APPDATA%\\EplanPruefer\\einstellungen.ini``
 * sonst:   ``$XDG_CONFIG_HOME/eplan_pruefer/einstellungen.ini`` bzw. ``~/.config/...``
 
-Die Datenbankstruktur (Tabelle, Felder, Primärschlüssel) steht ausschließlich
-hier – nie im Quellcode. Das Passwort wird – wie gefordert – in der Datei
-gespeichert; unter Linux/macOS erhält die Datei deshalb die Rechte 0600. Unter
-Windows gelten die Rechte des Benutzerprofils.
+Die Datenbankstruktur (Datei, Tabelle, Felder, Primärschlüssel) steht ausschließlich
+hier – nie im Quellcode. Unter Linux/macOS erhält die Datei die Rechte 0600.
 """
 
 from __future__ import annotations
@@ -21,7 +19,7 @@ import tempfile
 from dataclasses import fields
 from pathlib import Path
 
-from .logging import hole_protokollierer, registriere_geheimnis
+from .logging import hole_protokollierer
 from .modelle import (
     FELDNAMEN,
     FELDZUORDNUNG_VERSION,
@@ -104,7 +102,6 @@ class EinstellungsVerwalter:
         self._lese_dataclass(parser, _ABSCHNITT_ALLGEMEIN, einstellungen.allgemein)
         einstellungen.feldzuordnung = self._lese_feldzuordnung(parser)
 
-        registriere_geheimnis(einstellungen.datenbank.passwort)
         _log.info("Konfiguration geladen: %s", self._pfad)
         return einstellungen
 
@@ -123,7 +120,7 @@ class EinstellungsVerwalter:
                 elif isinstance(standard, int):
                     wert = int(roh.strip())
                 else:
-                    wert = roh.strip() if feld.name != "passwort" else roh
+                    wert = roh.strip()
                 setattr(ziel, feld.name, wert)
             except ValueError:
                 _log.warning("Ungültiger Wert für [%s] %s = %r – Standard %r bleibt.",
@@ -200,7 +197,6 @@ class EinstellungsVerwalter:
             raise EinstellungsFehler(
                 f"Die Konfiguration konnte nicht gespeichert werden:\n{self._pfad}\n{fehler}"
             ) from fehler
-        registriere_geheimnis(einstellungen.datenbank.passwort)
         _log.info("Konfiguration gespeichert: %s", self._pfad)
 
     # -- Plausibilität -------------------------------------------------------
@@ -209,10 +205,8 @@ class EinstellungsVerwalter:
     def pruefe(einstellungen: Einstellungen) -> None:
         """Wirft :class:`EinstellungsFehler`, wenn Werte offensichtlich unzulässig sind."""
         db: DatenbankEinstellungen = einstellungen.datenbank
-        if not 1 <= db.port <= 65535:
-            raise EinstellungsFehler("Der Datenbank-Port muss zwischen 1 und 65535 liegen.")
-        if not 1 <= db.verbindungs_timeout_s <= 300:
-            raise EinstellungsFehler("Der Verbindungs-Timeout muss zwischen 1 und 300 s liegen.")
+        if not 1 <= db.timeout_s <= 300:
+            raise EinstellungsFehler("Der Datenbank-Timeout muss zwischen 1 und 300 s liegen.")
         if einstellungen.allgemein.protokollstufe.upper() not in (
                 "DEBUG", "INFO", "WARNING", "ERROR"):
             raise EinstellungsFehler("Die Protokollstufe muss DEBUG, INFO, WARNING oder ERROR sein.")
@@ -220,12 +214,8 @@ class EinstellungsVerwalter:
             if not einstellungen.feldzuordnung.get(feld):
                 raise EinstellungsFehler(
                     f"Für das Feld „{feld}“ ist keine Bezeichnung hinterlegt.")
-        if any(zeichen in db.passwort for zeichen in ("\n", "\r", "\x00")):
-            raise EinstellungsFehler("Das Passwort darf keine Zeilenumbrüche enthalten "
-                                     "(es wird in einer Textdatei gespeichert).")
         for name in (db.tabellenname, db.feld_symbol, db.feld_funktionstext, db.primaerschluessel):
-            if name and any(zeichen in name for zeichen in ("`", "\x00", "\n", "\r")):
-                raise EinstellungsFehler(
-                    "Tabellen- und Feldnamen dürfen keine Backticks oder Steuerzeichen enthalten.")
-            if len(name) > 64:
-                raise EinstellungsFehler("Tabellen- und Feldnamen sind auf 64 Zeichen begrenzt.")
+            if any(ord(zeichen) < 32 or zeichen == "\x7f" for zeichen in name):
+                raise EinstellungsFehler("Tabellen- und Feldnamen dürfen keine Steuerzeichen enthalten.")
+            if len(name) > 128:
+                raise EinstellungsFehler("Tabellen- und Feldnamen sind auf 128 Zeichen begrenzt.")
