@@ -1,0 +1,4 @@
+PyQt6>=6.6
+mysql-connector-python>=8.4
+lxml>=5.0
+openpyxl>=3.1
