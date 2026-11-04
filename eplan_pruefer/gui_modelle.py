@@ -141,7 +141,7 @@ class DatensatzModell(_TabellenModell):
     """Alle eingelesenen SPS-Datensätze."""
 
     SPALTEN = ("Nr.", "Symbolische Adresse", "Funktionstext", "SPS-Adresse", "Seite",
-               "Seitenname", "Betriebsmittelkennzeichen", "Fundstelle")
+               "Seitenname", "BMK (sichtbar)", "Vollständiges BMK", "Fundstelle")
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
@@ -162,4 +162,4 @@ class DatensatzModell(_TabellenModell):
         d = self._daten[zeile]
         return (str(d.laufende_nummer), d.symbolische_adresse, d.funktionstext, d.sps_adresse,
                 d.seite_anzeige, d.seitenname, d.betriebsmittelkennzeichen,
-                d.fundstelle.als_text())[spalte]
+                d.vollstaendiges_bmk, d.fundstelle.als_text())[spalte]

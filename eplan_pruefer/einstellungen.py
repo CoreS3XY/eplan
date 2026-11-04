@@ -24,6 +24,7 @@ from pathlib import Path
 from .logging import hole_protokollierer, registriere_geheimnis
 from .modelle import (
     FELDNAMEN,
+    FELDZUORDNUNG_VERSION,
     STANDARD_FELDZUORDNUNG,
     DatenbankEinstellungen,
     EinstellungsFehler,
@@ -133,13 +134,25 @@ class EinstellungsVerwalter:
         ergebnis = dict(STANDARD_FELDZUORDNUNG)
         if not parser.has_section(_ABSCHNITT_FELDER):
             return ergebnis
+        try:
+            gespeicherte_version = int(parser.get(_ABSCHNITT_FELDER, "version", fallback="1"))
+        except ValueError:
+            gespeicherte_version = 1
         for feld in FELDNAMEN:
             if parser.has_option(_ABSCHNITT_FELDER, feld):
                 aliase = tuple(a.strip() for a in
                                parser.get(_ABSCHNITT_FELDER, feld).split(_TRENNER_ALIAS)
                                if a.strip())
+                if aliase and gespeicherte_version < FELDZUORDNUNG_VERSION:
+                    # Neue Standardbezeichnungen ergänzen; Anpassungen des Anwenders bleiben.
+                    vorhanden = {a.casefold() for a in aliase}
+                    aliase += tuple(a for a in STANDARD_FELDZUORDNUNG[feld]
+                                    if a.casefold() not in vorhanden)
                 if aliase:
                     ergebnis[feld] = aliase
+        if gespeicherte_version < FELDZUORDNUNG_VERSION:
+            _log.info("Feldzuordnung von Version %d auf %d aktualisiert (neue Standardbezeichnungen ergänzt).",
+                      gespeicherte_version, FELDZUORDNUNG_VERSION)
         return ergebnis
 
     # -- Speichern ----------------------------------------------------------
@@ -163,6 +176,7 @@ class EinstellungsVerwalter:
             feld: _TRENNER_ALIAS.join(einstellungen.feldzuordnung.get(feld, ()))
             for feld in FELDNAMEN
         }
+        parser[_ABSCHNITT_FELDER]["version"] = str(FELDZUORDNUNG_VERSION)
 
         verzeichnis = self._pfad.parent
         try:

@@ -81,7 +81,7 @@ _log = hole_protokollierer("gui")
 ANWENDUNGSNAME = "EPLAN-Prüfer"
 VERSION = "1.0.0"
 DATEIFILTER = ("EPLAN-Projekte (*.elk *.zw1);;"
-               "Exporte und Datenquellen (*.xml *.csv *.tsv *.txt *.xlsx *.db *.sqlite);;"
+               "Exporte und Datenquellen (*.txt *.dxf *.xml *.csv *.tsv *.xlsx *.db *.sqlite);;"
                "Alle Dateien (*)")
 
 
@@ -132,6 +132,8 @@ class Hauptfenster(QMainWindow):
 
         self.a_oeffnen = aktion("Datei öffnen …", self.datei_oeffnen, QKeySequence.StandardKey.Open,
                                 "EPLAN-Projekt (*.elk, *.zw1) oder Export öffnen")
+        self.a_ordner = aktion("Ordner öffnen … (z. B. DXF-Projektbaum)", self.ordner_oeffnen, "Ctrl+Shift+O",
+                               "Alle lesbaren Dateien eines Ordners samt Unterordnern einlesen")
         self.a_csv = aktion("Fehlerliste als CSV exportieren …", lambda: self._exportieren(".csv"))
         self.a_xlsx = aktion("Fehlerliste als Excel exportieren …", lambda: self._exportieren(".xlsx"))
         self.a_beenden = aktion("Beenden", self.close, QKeySequence.StandardKey.Quit)
@@ -154,7 +156,7 @@ class Hauptfenster(QMainWindow):
     def _baue_menue_und_werkzeugleiste(self) -> None:
         menue = self.menuBar()
         datei = menue.addMenu("&Datei")
-        datei.addActions([self.a_oeffnen])
+        datei.addActions([self.a_oeffnen, self.a_ordner])
         datei.addSeparator()
         datei.addActions([self.a_csv, self.a_xlsx])
         datei.addSeparator()
@@ -171,7 +173,7 @@ class Hauptfenster(QMainWindow):
 
         leiste = QToolBar("Hauptleiste")
         leiste.setMovable(False)
-        leiste.addActions([self.a_oeffnen, self.a_pruefen])
+        leiste.addActions([self.a_oeffnen, self.a_ordner, self.a_pruefen])
         leiste.addSeparator()
         leiste.addActions([self.a_csv, self.a_xlsx])
         leiste.addSeparator()
@@ -239,7 +241,7 @@ class Hauptfenster(QMainWindow):
         fl.addLayout(filterzeile)
         fl.addWidget(self.t_fehler, 1)
 
-        self.t_daten = self._baue_tabelle(self._datensatz_modell, (50, 170, 240, 90, 70, 150, 150, 300))
+        self.t_daten = self._baue_tabelle(self._datensatz_modell, (50, 170, 240, 90, 70, 150, 140, 140, 300))
         self.t_daten.doubleClicked.connect(lambda _i: self._zeige_fundstelle())
         self.t_daten.selectionModel().selectionChanged.connect(lambda *_: self._aktualisiere_details())
 
@@ -316,6 +318,7 @@ class Hauptfenster(QMainWindow):
         hat_daten = self._ergebnis is not None and bool(self._ergebnis.datensaetze)
         hat_fehler = self._bericht is not None and bool(self._bericht.fehler)
         self.a_oeffnen.setEnabled(frei)
+        self.a_ordner.setEnabled(frei)
         self.a_pruefen.setEnabled(frei and hat_daten)
         self.a_csv.setEnabled(frei and hat_fehler)
         self.a_xlsx.setEnabled(frei and hat_fehler)
@@ -447,12 +450,18 @@ class Hauptfenster(QMainWindow):
         if pfad:
             self.datei_laden(Path(pfad))
 
+    def ordner_oeffnen(self) -> None:
+        start = self._einstellungen.allgemein.letztes_verzeichnis or str(Path.home())
+        pfad = QFileDialog.getExistingDirectory(self, "Ordner öffnen (Projektbaum)", start)
+        if pfad:
+            self.datei_laden(Path(pfad))
+
     def datei_laden(self, pfad: Path) -> None:
         """Liest eine Datei im Hintergrund ein und startet danach (optional) die Prüfung."""
         if self.beschaeftigt:
             zeige_information(self, ANWENDUNGSNAME, "Es läuft bereits ein Vorgang.")
             return
-        self._einstellungen.allgemein.letztes_verzeichnis = str(pfad.parent)
+        self._einstellungen.allgemein.letztes_verzeichnis = str(pfad if pfad.is_dir() else pfad.parent)
         leser = EplanDateiLeser(self._einstellungen)
         _log.info("Datei öffnen: %s", pfad)
         self._starte(f"Lese {pfad.name}",

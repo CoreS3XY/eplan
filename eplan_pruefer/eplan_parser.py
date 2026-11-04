@@ -34,6 +34,7 @@ import csv
 import dataclasses
 import gzip
 import io
+import re
 import sqlite3
 import threading
 import unicodedata
@@ -315,6 +316,8 @@ class LeseKontext:
     hauptdatei: str
     abbruch: threading.Event | None = None
     warnungen: list[str] = field(default_factory=list)
+    #: Strukturbeschreibungen von Dateien, die erkannt, aber nicht ausgewertet werden konnten
+    diagnose: list[str] = field(default_factory=list)
 
     def pruefe_abbruch(self) -> None:
         if self.abbruch is not None and self.abbruch.is_set():
@@ -332,6 +335,10 @@ def _bereinige(wert: object) -> str:
     return str(wert).replace("\x00", "").strip()
 
 
+#: Ein „sichtbares BMK" der Form ``=U4+E2/2.2`` ist in EPLAN eine Fundstelle (Seite 2, Spalte 2).
+_SEITENVERWEIS = re.compile(r"^(?P<referenz>[=+][^/]*/(?P<nummer>\d+[A-Za-z]?))(?:\.\d+)?$")
+
+
 def erzeuge_datensatz(felder: Mapping[str, str], fundstelle: Fundstelle) -> EplanDatensatz | None:
     """
     Baut einen Datensatz aus den gelesenen Feldern. Liefert ``None``, wenn weder
@@ -340,6 +347,11 @@ def erzeuge_datensatz(felder: Mapping[str, str], fundstelle: Fundstelle) -> Epla
     werte = {name: _bereinige(felder.get(name, "")) for name in FELDNAMEN}
     if not werte["sps_adresse"] and not werte["symbolische_adresse"]:
         return None
+    if not werte["seitenreferenz"] and not werte["seitennummer"]:
+        verweis = _SEITENVERWEIS.match(werte["betriebsmittelkennzeichen"])
+        if verweis:                        # Quelle ohne Seitenspalte: Seite aus der Fundstelle im BMK
+            werte["seitenreferenz"] = verweis.group("referenz")
+            werte["seitennummer"] = verweis.group("nummer")
     if not werte["seitennummer"]:
         werte["seitennummer"] = leite_seitennummer_ab(werte["seitenreferenz"])
     return EplanDatensatz(fundstelle=fundstelle, **werte)
@@ -412,6 +424,44 @@ def _erkenne_trennzeichen(text: str) -> str:
     return beste
 
 
+def _ohne_anfuehrung(zelle: str) -> str:
+    zelle = zelle.strip()
+    if len(zelle) >= 2 and zelle[0] == zelle[-1] == '"':
+        return zelle[1:-1].replace('""', '"')
+    return zelle
+
+
+def _tabulatorzeilen(text: str, zuordner: Feldzuordner) -> list[tuple[int, list[str]]]:
+    """
+    Zerlegt tabulatorgetrennten Text (z. B. EPLAN-Exportlisten) in Zellen.
+
+    Solche Listen verwenden oft mehrere Tabulatoren zur optischen Ausrichtung. Zuerst wird
+    exakt an jedem Tabulator getrennt (Leerspalten bleiben erhalten). Passen die Datenzeilen
+    dazu nicht – Werte stehen in Spalten, die in der Kopfzeile leer sind –, werden aufeinander-
+    folgende Tabulatoren als ein Trenner behandelt.
+    """
+    zeilen = [(nummer, zeile) for nummer, zeile in enumerate(re.split(r"\r?\n", text), start=1)
+              if zeile.strip()]
+    exakt = [(n, [_ohne_anfuehrung(z) for z in zeile.split("\t")]) for n, zeile in zeilen]
+    if _exakte_trennung_passt(exakt, zuordner):
+        return exakt
+    return [(n, [_ohne_anfuehrung(z) for z in re.split(r"\t+", zeile.rstrip("\t"))])
+            for n, zeile in zeilen]
+
+
+def _exakte_trennung_passt(zeilen: list[tuple[int, list[str]]], zuordner: Feldzuordner) -> bool:
+    for index, (_, zellen) in enumerate(zeilen[:MAX_KOPFZEILEN_SUCHE]):
+        if not zuordner.ist_brauchbar(zuordner.spalten(zellen)):
+            continue
+        leere = {i for i, zelle in enumerate(zellen) if not zelle.strip()}
+        if not leere:
+            return True
+        probe = [z for _, z in zeilen[index + 1:index + 301]]
+        verletzt = sum(1 for z in probe if any(i < len(z) and z[i].strip() for i in leere))
+        return verletzt <= 0.1 * len(probe)
+    return False
+
+
 class CsvExtraktor(DatensatzExtraktor):
     """Textlisten (CSV/TSV), wie sie EPLAN-Berichte und -Exporte erzeugen."""
 
@@ -428,6 +478,10 @@ class CsvExtraktor(DatensatzExtraktor):
     def extrahiere(self, teildatei: Teildatei, kontext: LeseKontext) -> Iterator[EplanDatensatz]:
         text = _dekodiere_text(teildatei.lese_alles())
         trennzeichen = _erkenne_trennzeichen(text)
+        if trennzeichen == "\t":
+            yield from _tabellenzeilen_zu_datensaetzen(
+                _tabulatorzeilen(text, kontext.zuordner), teildatei.name, "", kontext)
+            return
         leser = csv.reader(io.StringIO(text, newline=""), delimiter=trennzeichen, quotechar='"')
 
         def zeilen() -> Iterator[tuple[int, Sequence[object]]]:
@@ -710,7 +764,8 @@ class XmlExtraktor(DatensatzExtraktor):
 
 def standard_extraktoren() -> list[DatensatzExtraktor]:
     """Reihenfolge = Priorität bei der Formaterkennung."""
-    return [SqliteExtraktor(), XlsxExtraktor(), XmlExtraktor(), CsvExtraktor()]
+    from .dxf_parser import DxfExtraktor        # hier importiert: dxf_parser nutzt Klassen dieses Moduls
+    return [DxfExtraktor(), SqliteExtraktor(), XlsxExtraktor(), XmlExtraktor(), CsvExtraktor()]
 
 
 def _finde_edb_verzeichnis(elk: Path) -> Path | None:
@@ -844,6 +899,10 @@ class EplanDateiLeser:
             diagnose = unbekannte.als_text()
             ergebnis.strukturbericht += "\n\n" + diagnose
             _log.info("Strukturanalyse der nicht ausgewerteten Dateien:\n%s", diagnose)
+        if kontext.diagnose:
+            text = "\n\n".join(kontext.diagnose)
+            ergebnis.strukturbericht += "\n\n" + text
+            _log.info("Strukturanalyse erkannter, aber leerer Dateien:\n%s", text)
 
         if verdopplungen:
             _log.info("%d identische Datensätze aus mehreren Teildateien zusammengeführt.", verdopplungen)
@@ -851,7 +910,12 @@ class EplanDateiLeser:
                                 for n, d in enumerate(rohdaten, start=1)]
         ergebnis.seiten = self._sammle_seiten(ergebnis.datensaetze)
 
-        if not ergebnis.datensaetze:
+        if not ergebnis.datensaetze and kontext.diagnose:
+            ergebnis.warnungen.append(
+                "Es wurden keine SPS-Datensätze gefunden. Die gelesenen Dateien (z. B. DXF) enthalten keine "
+                "Felder, die der Feldzuordnung entsprechen. Ihr Aufbau steht im Einleseprotokoll; passende "
+                "Bezeichnungen unter Extras ▸ Einstellungen ▸ Feldzuordnung eintragen.")
+        elif not ergebnis.datensaetze:
             if edb is not None:
                 ergebnis.warnungen.append(
                     "Es wurden keine SPS-Datensätze gefunden. Die Projektdaten liegen im Ordner "
@@ -981,6 +1045,11 @@ class QuellenAuszugLeser:
         ziel = fundstelle.zeile or 1
         start = max(1, ziel - umgebung)
         ende = min(len(zeilen), ziel + umgebung)
+        if endung == ".dxf":
+            # Eine DXF-Entität belegt viele Zeilen (Gruppencode/Wert); die Fundstelle zeigt auf ihren
+            # Beginn, der Inhalt steht darunter.
+            start = max(1, ziel - 2)
+            ende = min(len(zeilen), ziel + max(umgebung, 80))
         ausschnitt: list[tuple[int, str]] = []
         for nummer in range(start, ende + 1):
             inhalt = zeilen[nummer - 1]

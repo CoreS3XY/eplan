@@ -102,7 +102,8 @@ class EplanDatensatz:
     seitenreferenz: str = ""        # vollständige Seitenbezeichnung, z. B. "=ANL+SCH/12"
     seitennummer: str = ""          # nur die Nummer, z. B. "12"
     seitenname: str = ""            # Seitenbeschreibung / Seitentitel
-    betriebsmittelkennzeichen: str = ""
+    betriebsmittelkennzeichen: str = ""     # „sichtbares" BMK
+    vollstaendiges_bmk: str = ""            # vollständiges BMK, sofern die Quelle beide liefert
     fundstelle: Fundstelle = field(default_factory=lambda: Fundstelle(datei=""))
     laufende_nummer: int = 0        # Reihenfolge des Einlesens, beginnt bei 1
 
@@ -273,7 +274,12 @@ FELDNAMEN: tuple[str, ...] = (
     "seitennummer",
     "seitenname",
     "betriebsmittelkennzeichen",
+    "vollstaendiges_bmk",
 )
+
+#: Version der Standard-Feldzuordnung. Wird sie erhöht, ergänzt das Laden alter Konfigurationen
+#: die neuen Standardbezeichnungen (vorhandene Einträge des Anwenders bleiben erhalten).
+FELDZUORDNUNG_VERSION = 2
 
 FELD_ANZEIGENAMEN: dict[str, str] = {
     "symbolische_adresse": "Symbolische Adresse",
@@ -282,7 +288,8 @@ FELD_ANZEIGENAMEN: dict[str, str] = {
     "seitenreferenz": "Seitenreferenz (Seitenbezeichnung)",
     "seitennummer": "Seitennummer",
     "seitenname": "Seitenname",
-    "betriebsmittelkennzeichen": "Betriebsmittelkennzeichen",
+    "betriebsmittelkennzeichen": "Betriebsmittelkennzeichen (sichtbar)",
+    "vollstaendiges_bmk": "Vollständiges BMK",
 }
 
 #: Standard-Bezeichnungen, unter denen die Felder in Exporten/XML/Tabellen vorkommen.
@@ -292,13 +299,15 @@ STANDARD_FELDZUORDNUNG: dict[str, tuple[str, ...]] = {
                             "Symbol", "Symbolik"),
     "funktionstext": ("Funktionstext", "Funktionstext (Langtext)", "Function text",
                       "FunctionText", "Langtext"),
-    "sps_adresse": ("SPS-Adresse", "PLC address", "PLCAddress", "Adresse", "Address"),
+    "sps_adresse": ("SPS-Adresse", "PLC address", "PLCAddress", "Adresse", "Address", "EPLAN426"),
     "seitenreferenz": ("Seitenreferenz", "Seitenbezeichnung", "Seitenverweis",
                        "Page designation", "Page reference"),
     "seitennummer": ("Seitennummer", "Seite", "Page", "Page number", "Blatt"),
     "seitenname": ("Seitenname", "Seitentitel", "Seitenbeschreibung", "Page name"),
-    "betriebsmittelkennzeichen": ("Betriebsmittelkennzeichen", "BMK", "Device tag",
-                                  "DeviceTag", "Equipment identifier", "Betriebsmittel"),
+    "betriebsmittelkennzeichen": ("Betriebsmittelkennzeichen", "BMK", "Sichtbares BMK",
+                                  "Device tag", "DeviceTag", "Equipment identifier", "Betriebsmittel"),
+    "vollstaendiges_bmk": ("Vollständiges BMK", "Vollstaendiges BMK",
+                           "Vollständiges Betriebsmittelkennzeichen", "Full device tag"),
 }
 
 

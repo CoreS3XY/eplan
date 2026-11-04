@@ -27,6 +27,22 @@ der Entwicklung lagen **keine echten Projektdateien** vor. Das Programm rät des
 Die Feldbezeichnungen (auch EPLAN-Eigenschaftsnummern wie `P20400`) sind im Einstellungsdialog konfigurierbar.
 Ob Ihre Projektdateien direkt lesbar sind, zeigt der erste Öffnungsversuch. Details und Alternativen: [`docs/ANALYSE.md`](docs/ANALYSE.md).
 
+## Unterstützte Eingabeformate
+
+| Format | Inhalt | Stand |
+|---|---|---|
+| `*.txt` / `*.csv` / `*.tsv` | Listen, z. B. `Symbolische Adresse ⇥ Adresse ⇥ Funktionstext ⇥ Sichtbares BMK ⇥ Vollständiges BMK`; Trennzeichen wird erkannt (Tabulator, `;`, `,`), auch bei mehreren Tabulatoren zur Ausrichtung | getestet mit dem Beispiel des Anwenders |
+| `*.dxf` | eine Seite des E-Plans je Datei; Datensätze aus **Block-Attributen** (`INSERT`/`ATTRIB`) oder aus einer **Texttabelle** (Kopfzeile Anschl./BMK/Funktionstext/Symbolische Adresse/Adresse); Seite aus dem Dateinamen (`_N2_E2_1.dxf` → `=N2+E2/1`) | getestet nur mit nach DXF-Spezifikation erzeugten Dateien, **nicht** mit echten EPLAN-DXF |
+| `*.xlsx`, `*.xml`, SQLite | siehe oben | getestet |
+| `*.elk`, `*.zw1` | siehe oben | Format proprietär, nicht direkt lesbar, siehe `docs/ANALYSE.md` |
+
+DXF-Projektbäume öffnen Sie über **Datei ▸ Ordner öffnen** (oder Ordner in das Fenster ziehen): alle Dateien in allen
+Unterordnern werden eingelesen, der Pfad steht in der Fundstelle.
+
+**Seite bei Listen ohne Seitenspalte:** Hat die Quelle keine Seite, aber ein sichtbares BMK der Form `=U4+E2/2.2`,
+wird dies als Fundstelle gelesen (Seitenreferenz `=U4+E2/2`, Seitennummer `2`; die Spalte `.2` bleibt im BMK).
+Das ist eine Annahme über das EPLAN-Format – bitte prüfen.
+
 ## Installation
 
 Voraussetzung: **Python 3.11 oder neuer** (entwickelt und getestet mit Python 3.13).
@@ -126,7 +142,7 @@ eplan/
 │   ├── gui_dialoge.py         Einstellungen, Seitenansicht, Berichte
 │   ├── gui_modelle.py         Qt-Tabellenmodelle, Filter
 │   └── gui_arbeiter.py        Hintergrund-Threads
-└── tests/                     130 automatische Tests
+└── tests/                     160 automatische Tests
 ```
 
 ## Tests

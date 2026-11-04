@@ -51,6 +51,24 @@ Zusätzlich liefert die **Dateistrukturanalyse** (`DateiAnalysator`, Menü *Extr
 
 > **Was bei Ihnen zu prüfen bleibt:** Ob Ihre `*.zw1`/`*.elk` direkt lesbar sind, ergibt der erste Öffnungsversuch. Falls nicht, schicken Sie den *Strukturbericht* (Menü *Extras ▸ Dateistruktur analysieren*) oder besser eine kleine, nicht vertrauliche Testdatei – dann kann ein dafür passender Extraktor ergänzt werden (siehe `ARCHITEKTUR.md`, Abschnitt Erweiterung).
 
+### Textlisten (`*.txt`) und DXF-Seiten
+
+* **Textlisten** mit den Spalten *Symbolische Adresse, Adresse, Funktionstext, Sichtbares BMK, Vollständiges BMK* werden
+  gelesen. Mehrere Tabulatoren zur Ausrichtung werden erkannt; stehen Werte in Spalten, die in der Kopfzeile leer sind,
+  wird jede Tabulatorfolge als ein Trenner behandelt. Das Modell hat dafür ein zusätzliches Feld *Vollständiges BMK*.
+* **Annahme zum „sichtbaren BMK":** Werte wie `=U4+E2/2.2` sehen wie EPLAN-Fundstellen aus (Seite 2, Spalte 2). Fehlt in
+  der Quelle eine Seite, wird daraus Seitenreferenz und Seitennummer abgeleitet. Das wurde nicht an EPLAN-Dokumentation
+  überprüft.
+* **DXF:** Das ASCII-DXF-Format ist öffentlich spezifiziert, **wo EPLAN die SPS-Anschlüsse darin ablegt, ist nicht
+  belegt**. Der Leser unterstützt (A) Attribute an Blöcken und (B) Tabellen aus Textobjekten und ordnet sie über die
+  Feldzuordnung zu. Als SPS-Adresse ist auf Angabe des Anwenders `EPLAN426` voreingestellt; weitere Attribut-Namen
+  (z. B. für BMK, Funktionstext, Symbol) sind **nicht bekannt** und müssen ggf. in den Einstellungen ergänzt werden.
+  Findet der Leser nichts, schreibt er Entitätsarten, Blöcke, Attribut-Namen mit Beispielwerten und Texte in den
+  Strukturbericht (*Extras ▸ Diagnosebericht speichern*) – damit lässt sich die Zuordnung ohne Rätselraten ergänzen.
+* **Offene Fragen zu DXF:** Binär-DXF wird abgelehnt; verschachtelte Blöcke, mehrzeilige Zellen und rechtsbündig
+  ausgerichtete Tabellenspalten sind nicht berücksichtigt. Die Seite stammt aus dem Dateinamen (`_N2_E2_1.dxf` →
+  `=N2+E2/1`); der Seitenname ist aus der DXF nicht ableitbar.
+
 ## 3. Verlässliche Alternative über EPLAN selbst
 
 Wenn die Projektdateien nicht direkt lesbar sind, ist der robuste Weg, EPLAN die Daten ausgeben zu lassen. Das Programm liest solche Ausgaben bereits:
