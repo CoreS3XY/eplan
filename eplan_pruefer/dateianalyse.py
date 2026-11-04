@@ -71,6 +71,7 @@ class Strukturbericht:
     archiveintraege: list[str] = field(default_factory=list)
     archiv_anzahl: int = 0
     zeichenketten: list[str] = field(default_factory=list)
+    textinhalt: str = ""                # Inhalt kleiner Textdateien (z. B. der *.elk-Verweisdatei)
     verzeichnisinhalt: list[str] = field(default_factory=list)
     hinweise: list[str] = field(default_factory=list)
 
@@ -97,6 +98,9 @@ class Strukturbericht:
                 z.extend(f"  {e}" for e in self.archiveintraege)
                 if self.archiv_anzahl > len(self.archiveintraege):
                     z.append(f"  … und {self.archiv_anzahl - len(self.archiveintraege)} weitere")
+            if self.textinhalt:
+                z.append("Inhalt (Textdatei):")
+                z.extend(f"  | {zeile}" for zeile in self.textinhalt.splitlines()[:40])
             if self.zeichenketten:
                 z.append("Lesbare Zeichenketten (Stichprobe):")
                 z.extend(f"  {s}" for s in self.zeichenketten)
@@ -136,6 +140,18 @@ def erkenne_codierung(daten: bytes) -> str:
         return "UTF-8"
     except UnicodeDecodeError:
         return "Windows-1252 (ANSI)"
+
+
+def dekodiere_text(daten: bytes) -> str:
+    """BOM-gesteuerte Dekodierung: UTF-8/UTF-16, sonst UTF-8, sonst Windows-1252."""
+    if daten.startswith(b"\xef\xbb\xbf"):
+        return daten[3:].decode("utf-8", errors="replace")
+    if daten.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return daten.decode("utf-16", errors="replace")
+    try:
+        return daten.decode("utf-8")
+    except UnicodeDecodeError:
+        return daten.decode("cp1252", errors="replace")
 
 
 def _erkenne_art(kopf: bytes, codierung: str) -> str:
@@ -213,6 +229,8 @@ class DateiAnalysator:
         bericht.signaturen = self._suche_signaturen(bereich)
         self._lese_archiv(pfad, bericht)
         bericht.zeichenketten = self._sammle_zeichenketten(bereich[:ZEICHENKETTEN_BEREICH])
+        if bericht.codierung and groesse <= 2048:
+            bericht.textinhalt = dekodiere_text(bereich).replace("\x00", "").strip()
         self._bewerte(pfad, bericht)
         return bericht
 
@@ -285,3 +303,22 @@ class DateiAnalysator:
                      "CSV/XLSX/XML oder per EPLAN-API) und diese Datei öffnen – siehe README.")
         if pfad.suffix.lower() in (".elk", ".zw1") and art == "ZIP-Archiv":
             h.append(f"Die Endung {pfad.suffix.lower()} enthält hier ein Standard-ZIP.")
+
+
+def beschreibe_kopf(kopf: bytes) -> list[str]:
+    """Kurzbeschreibung der ersten Bytes einer Datei (für Diagnoseberichte unbekannter Formate)."""
+    codierung = erkenne_codierung(kopf)
+    zeilen = [
+        f"Art: {_erkenne_art(kopf, codierung)}" + (f", {codierung}" if codierung else "")
+        + f" | Entropie (Kopf): {berechne_entropie(kopf):.2f}".replace(".", ",") + " Bit/Byte",
+        "Kopf: " + kopf[:32].hex(" ").upper(),
+        "      " + "".join(chr(b) if 32 <= b < 127 else "." for b in kopf[:32]),
+    ]
+    zeichenketten = DateiAnalysator._sammle_zeichenketten(kopf)[:6]
+    if zeichenketten:
+        zeilen.append("Zeichenketten: " + " | ".join(z[:60] for z in zeichenketten))
+    signaturen = [f"{o}: {n}" for o, n in DateiAnalysator._suche_signaturen(kopf)
+                  if not (o == 0 and n == "XML-Deklaration")][:5]
+    if signaturen:
+        zeilen.append("Signaturen: " + "; ".join(signaturen))
+    return zeilen

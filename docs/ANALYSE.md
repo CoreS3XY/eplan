@@ -11,6 +11,18 @@
 | `*.zw0` / `*.elp` | gepackte Projekte (anderer Dateityp als `*.zw1`) | EPLAN-Hilfe |
 | SPS-Export | Die EPLAN-API enthält den Dienst `PlcService` mit Exportmethoden, u. a. `ExportAddressOverview` (CSV-Adressübersicht). | [EPLAN Platform API](https://www.eplan.help/en-US/Infoportal/content/api/2027/Eplan.EplApi.HEServicesu~Eplan.EplApi.HEServices.PlcService.html) |
 
+### Beobachtungen an einem realen Projekt (Anwenderlog)
+
+Ein Anwender hat das Programm auf ein echtes Projekt angewendet; das Log zeigt:
+
+* **`*.elk`** ist eine **winzige Textdatei** (36 Bytes, UTF-16 mit BOM), deren erste Zeile den Namen des Projektordners enthält (`80079501.edb`). Sie enthält keine Projektdaten.
+* **`*.edb`** ist ein Ordner mit `ProjectInfo.xml` (XML, nur Metadaten), einem Ordner `DOC` mit Office-Dokumenten (`.xlsx`, `.docx`), Unterordnern `*.sdb` und **je Datenbanktabelle einer Sperrdatei `*.lck`** (`Page`, `Function`, `Plc`, `PlcIoEntries`, `Instance`, `Connection`, …). Das zeigt: EPLAN speichert Projektdaten **tabellenweise in einem eigenen Datenbankformat**; die SPS-Daten liegen sehr wahrscheinlich in den Tabellen `Plc`/`PlcIoEntries`/`Function`/`Page`.
+* Die `*.lck`-Dateien waren „Zugriff verweigert" – sie werden von EPLAN gehalten, solange das Projekt geöffnet ist. Sie enthalten keine Daten und werden ignoriert.
+* Die Datendateien selbst wurden von keinem Extraktor erkannt. **Zu diesem Datenbankformat gibt es keine öffentliche Dokumentation**; auch die Suche danach blieb ergebnislos. Weitere Aufschlüsselung der Dateiendungen und Köpfe liefert der **Diagnosebericht** (*Extras ▸ Diagnosebericht speichern*), der jetzt je Endung Beispieldateien mit Kopf, Entropie und Zeichenketten ausgibt.
+* Hinweis aus EPLANs Dokumentation (Harness proD): Den Projektordner nicht von Hand ändern – Datenbeschädigung möglich. Das Programm **liest nur**; arbeiten Sie dennoch mit einer Sicherung/Kopie.
+
+**Folgerung:** Ob sich die Datendateien ohne EPLAN sauber lesen lassen, ist offen und nach dem derzeitigen Wissensstand eher unwahrscheinlich. Der verlässliche Weg bleibt der Export der SPS-Daten **aus EPLAN** (Abschnitt 3).
+
 ### Was nicht belegt ist
 
 * **Der innere Aufbau von `*.elk` und `*.zw1` ist öffentlich nicht spezifiziert.** Keine der gefundenen Quellen bestätigt, dass `*.zw1` ein ZIP-Container ist; ebenso wenig ist belegt, in welchem Format die Projektdaten im Inneren liegen.

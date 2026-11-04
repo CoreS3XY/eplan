@@ -47,7 +47,7 @@ from typing import BinaryIO, Callable, Iterable, Iterator, Mapping, Sequence
 
 from lxml import etree
 
-from .dateianalyse import DateiAnalysator
+from .dateianalyse import DateiAnalysator, beschreibe_kopf, dekodiere_text
 from .logging import hole_protokollierer
 from .modelle import (
     FELDNAMEN,
@@ -73,6 +73,7 @@ MAX_VERSCHACHTELUNG = 3                         # Archive in Archiven
 MAX_SPEICHER_TEILDATEI = 512 * 1024 * 1024      # Dateien, die komplett in den Speicher müssen
 KOPF_BYTES = 4096
 MAX_KOPFZEILEN_SUCHE = 30
+_OFFICE_ENDUNGEN = (".xlsx", ".xlsm", ".docx", ".docm", ".pptx", ".pptm", ".odt", ".ods", ".odp")
 
 FortschrittsMelder = Callable[[str, int, int], None]   # (Meldung, aktuell, gesamt; gesamt 0 = unbekannt)
 
@@ -204,10 +205,17 @@ class ContainerLeser:
         self._eintraege = 0
         #: (Name, Grund) für Einträge, die nicht gelesen werden konnten (verschlüsselt, defekt …)
         self.uebersprungen: list[tuple[str, str]] = []
+        #: Namen von Dateien, auf die der Zugriff verweigert wurde (z. B. von EPLAN gesperrt)
+        self.gesperrt: list[str] = []
+        #: Anzahl der übergangenen Sperrdateien (*.lck); sie enthalten keine Projektdaten
+        self.sperrdateien = 0
 
     def teildateien(self, pfad: Path) -> Iterator[Teildatei]:
         if pfad.is_dir():
             for datei in sorted(p for p in pfad.rglob("*") if p.is_file() and not p.is_symlink()):
+                if datei.suffix.lower() == ".lck":
+                    self.sperrdateien += 1
+                    continue
                 name = f"{pfad.name}/{datei.relative_to(pfad).as_posix()}"
                 yield from self._untersuche(name, _datei_oeffner(datei), datei.stat().st_size, 0, True)
         else:
@@ -228,6 +236,9 @@ class ContainerLeser:
         try:
             with oeffner() as strom:
                 kopf = strom.read(KOPF_BYTES)
+        except PermissionError:
+            self.gesperrt.append(name)
+            return
         except _LESEFEHLER as fehler:
             self.uebersprungen.append((name, f"nicht lesbar: {fehler}"))
             return
@@ -239,8 +250,9 @@ class ContainerLeser:
                 innen, lambda o=oeffner: gzip.GzipFile(fileobj=o()), -1, tiefe + 1, False)
             return
 
-        # Office-Open-XML-Arbeitsmappen sind ZIPs, werden aber als Ganzes ausgewertet
-        if name.lower().endswith((".xlsx", ".xlsm")) and kopf.startswith(b"PK"):
+        # Office-Dokumente sind ZIPs, werden aber nicht zerlegt: Arbeitsmappen wertet der
+        # XLSX-Extraktor als Ganzes aus, Word-/PowerPoint-Dateien enthalten keine SPS-Daten.
+        if name.lower().endswith(_OFFICE_ENDUNGEN) and kopf.startswith(b"PK"):
             yield Teildatei(name, groesse, oeffner, self._budget)
             return
 
@@ -385,16 +397,7 @@ def _tabellenzeilen_zu_datensaetzen(
 _TEXT_ENDUNGEN = {".csv", ".tsv", ".txt", ".lst", ".dat", ".prn"}
 
 
-def _dekodiere_text(daten: bytes) -> str:
-    """BOM-gesteuerte Dekodierung: UTF-8/UTF-16, sonst UTF-8, sonst Windows-1252."""
-    if daten.startswith(codecs.BOM_UTF8):
-        return daten[3:].decode("utf-8", errors="replace")
-    if daten.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-        return daten.decode("utf-16", errors="replace")
-    try:
-        return daten.decode("utf-8")
-    except UnicodeDecodeError:
-        return daten.decode("cp1252", errors="replace")
+_dekodiere_text = dekodiere_text
 
 
 def _erkenne_trennzeichen(text: str) -> str:
@@ -724,6 +727,56 @@ def _finde_edb_verzeichnis(elk: Path) -> Path | None:
     return None
 
 
+def _mit_punkten(zahl: int) -> str:
+    """Zahl mit deutschem Tausenderpunkt (1234567 -> 1.234.567)."""
+    return f"{zahl:,}".replace(",", ".")
+
+
+class _UnbekannteDateien:
+    """Sammelt je Dateiendung, was kein Extraktor erkannt hat, samt Strukturbeispielen."""
+
+    MAX_BEISPIELE = 3
+    MAX_ENDUNGEN = 25
+
+    def __init__(self) -> None:
+        self.anzahl: Counter[str] = Counter()
+        self.bytes: Counter[str] = Counter()
+        self._beispiele: dict[str, list[tuple[int, str, bytes]]] = {}
+
+    def merke(self, teildatei: Teildatei, kopf: bytes) -> None:
+        endung = teildatei.endung or "(ohne Endung)"
+        self.anzahl[endung] += 1
+        self.bytes[endung] += max(teildatei.groesse, 0)
+        beispiele = self._beispiele.setdefault(endung, [])
+        beispiele.append((teildatei.groesse, teildatei.name, kopf))
+        beispiele.sort(key=lambda eintrag: -eintrag[0])
+        del beispiele[self.MAX_BEISPIELE:]
+
+    def als_text(self) -> str:
+        zeilen = ["Nicht ausgewertete Dateien (kein passender Extraktor), je Endung:"]
+        for endung, _ in self.bytes.most_common(self.MAX_ENDUNGEN):
+            zeilen.append(f"  {endung}: {self.anzahl[endung]} Datei(en), {_mit_punkten(self.bytes[endung])} Bytes")
+            for groesse, name, kopf in self._beispiele[endung]:
+                zeilen.append(f"    Beispiel: {name} ({_mit_punkten(max(groesse, 0))} Bytes)")
+                zeilen.extend(f"      {zeile}" for zeile in beschreibe_kopf(kopf))
+        if len(self.bytes) > self.MAX_ENDUNGEN:
+            zeilen.append(f"  … und {len(self.bytes) - self.MAX_ENDUNGEN} weitere Endungen")
+        return "\n".join(zeilen)
+
+
+def erzeuge_diagnosebericht(ergebnis: Einleseergebnis) -> str:
+    """Textbericht über ein Einleseergebnis – zum Speichern und Weitergeben bei Formatproblemen."""
+    zeilen = ["Diagnosebericht EPLAN-Prüfer", f"Quelle: {ergebnis.quelle}",
+              f"Datensätze: {len(ergebnis.datensaetze)}, Seiten: {len(ergebnis.seiten)}", "",
+              "Teildateien:"]
+    zeilen.extend(f"  [{t.art}] {t.name} – {t.datensaetze} Datensätze"
+                  + (f" – {t.hinweis}" if t.hinweis else "") for t in ergebnis.teildateien)
+    zeilen += ["", "Warnungen:"]
+    zeilen.extend(f"  - {w}" for w in ergebnis.warnungen or ["keine"])
+    zeilen += ["", "Strukturbericht:", ergebnis.strukturbericht or "(keiner)"]
+    return "\n".join(zeilen) + "\n"
+
+
 class EplanDateiLeser:
     """
     Fassade: liest eine EPLAN-Datei (oder einen Export davon) vollständig ein.
@@ -764,7 +817,7 @@ class EplanDateiLeser:
             quellen.append(edb)
 
         gesehen: dict[tuple[str, ...], str] = {}
-        nicht_unterstuetzt: Counter[str] = Counter()
+        unbekannte = _UnbekannteDateien()
         verdopplungen = 0
         rohdaten: list[EplanDatensatz] = []
 
@@ -775,17 +828,22 @@ class EplanDateiLeser:
                     if fortschritt:
                         fortschritt(f"Lese {teildatei.name}", len(ergebnis.teildateien), 0)
                     verdopplungen += self._verarbeite(
-                        teildatei, kontext, ergebnis, rohdaten, gesehen, nicht_unterstuetzt)
+                        teildatei, kontext, ergebnis, rohdaten, gesehen, unbekannte)
             except _LESEFEHLER as fehler:
                 raise EplanDateiFehler(f"Die Datei „{quelle.name}“ ist nicht lesbar: {fehler}") from fehler
             for name, grund in container.uebersprungen:
                 ergebnis.teildateien.append(TeildateiBericht(name, "übersprungen", 0, grund))
                 _log.warning("Übersprungen: %s (%s)", name, grund)
+            self._melde_sperren(container, quelle, ergebnis)
 
-        for endung, anzahl in sorted(nicht_unterstuetzt.items()):
+        for endung, anzahl in sorted(unbekannte.anzahl.items()):
             ergebnis.teildateien.append(TeildateiBericht(
-                f"{anzahl} Datei(en) {endung or '(ohne Endung)'}", "nicht unterstützt", 0,
+                f"{anzahl} Datei(en) {endung}", "nicht unterstützt", 0,
                 "Format wird nicht ausgewertet"))
+        if unbekannte.anzahl:
+            diagnose = unbekannte.als_text()
+            ergebnis.strukturbericht += "\n\n" + diagnose
+            _log.info("Strukturanalyse der nicht ausgewerteten Dateien:\n%s", diagnose)
 
         if verdopplungen:
             _log.info("%d identische Datensätze aus mehreren Teildateien zusammengeführt.", verdopplungen)
@@ -794,10 +852,18 @@ class EplanDateiLeser:
         ergebnis.seiten = self._sammle_seiten(ergebnis.datensaetze)
 
         if not ergebnis.datensaetze:
-            ergebnis.warnungen.append(
-                "Es wurden keine SPS-Datensätze gefunden. Die Datei hat vermutlich ein proprietäres, "
-                "nicht lesbares Binärformat oder enthält keine passenden Felder. "
-                "Bitte Strukturbericht prüfen und ggf. einen Export aus EPLAN (CSV/XLSX/XML) öffnen.")
+            if edb is not None:
+                ergebnis.warnungen.append(
+                    "Es wurden keine SPS-Datensätze gefunden. Die Projektdaten liegen im Ordner "
+                    f"„{edb.name}“ in EPLANs eigenem Datenbankformat, das dieses Programm nicht direkt "
+                    "lesen kann (die *.elk enthält nur einen Verweis darauf). Bitte die SPS-Daten in EPLAN "
+                    "exportieren (CSV/XLSX/XML) und diese Datei öffnen. Welche Dateien der Ordner enthält, "
+                    "steht im Einleseprotokoll (Extras ▸ Diagnosebericht speichern).")
+            else:
+                ergebnis.warnungen.append(
+                    "Es wurden keine SPS-Datensätze gefunden. Die Datei hat vermutlich ein proprietäres, "
+                    "nicht lesbares Binärformat oder enthält keine passenden Felder. "
+                    "Bitte Strukturbericht prüfen und ggf. einen Export aus EPLAN (CSV/XLSX/XML) öffnen.")
         _log.info("Einlesen beendet: %d Datensätze, %d Seiten, %d Warnungen (%s)",
                   len(ergebnis.datensaetze), len(ergebnis.seiten), len(ergebnis.warnungen), pfad.name)
         return ergebnis
@@ -806,7 +872,7 @@ class EplanDateiLeser:
 
     def _verarbeite(self, teildatei: Teildatei, kontext: LeseKontext, ergebnis: Einleseergebnis,
                     rohdaten: list[EplanDatensatz], gesehen: dict[tuple[str, ...], str],
-                    nicht_unterstuetzt: Counter[str]) -> int:
+                    unbekannte: _UnbekannteDateien) -> int:
         """Liest eine Teildatei; liefert die Zahl zusammengeführter Dubletten."""
         try:
             kopf = teildatei.lese_kopf()
@@ -816,7 +882,7 @@ class EplanDateiLeser:
 
         extraktor = next((e for e in self._extraktoren if e.unterstuetzt(teildatei.name, kopf)), None)
         if extraktor is None:
-            nicht_unterstuetzt[teildatei.endung] += 1
+            unbekannte.merke(teildatei, kopf)
             _log.debug("Kein Extraktor für %s", teildatei.name)
             return 0
 
@@ -844,6 +910,24 @@ class EplanDateiLeser:
         ergebnis.teildateien.append(TeildateiBericht(teildatei.name, extraktor.art, gefunden, hinweis))
         _log.info("%s [%s]: %d Datensätze", teildatei.name, extraktor.art, gefunden)
         return verdoppelt
+
+    @staticmethod
+    def _melde_sperren(container: ContainerLeser, quelle: Path, ergebnis: Einleseergebnis) -> None:
+        """Fasst gesperrte Dateien und Sperrdateien (*.lck) in je einer Meldung zusammen."""
+        if container.sperrdateien:
+            _log.info("%d Sperrdateien (*.lck) in %s übergangen.", container.sperrdateien, quelle.name)
+            ergebnis.teildateien.append(TeildateiBericht(
+                f"{container.sperrdateien} Sperrdatei(en) *.lck", "ignoriert", 0,
+                "enthalten keine Projektdaten"))
+        if container.gesperrt:
+            beispiele = ", ".join(container.gesperrt[:3])
+            meldung = (f"{len(container.gesperrt)} Datei(en) in „{quelle.name}“ sind gesperrt "
+                       f"(Zugriff verweigert, z. B. {beispiele}). Das Projekt ist vermutlich in EPLAN "
+                       "geöffnet. Bitte das Projekt in EPLAN schließen oder eine Kopie verwenden.")
+            ergebnis.warnungen.append(meldung)
+            ergebnis.teildateien.append(TeildateiBericht(
+                f"{len(container.gesperrt)} gesperrte Datei(en)", "gesperrt", 0, "Zugriff verweigert"))
+            _log.warning(meldung)
 
     @staticmethod
     def _sammle_seiten(datensaetze: Sequence[EplanDatensatz]) -> list[EplanSeite]:

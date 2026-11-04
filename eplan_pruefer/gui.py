@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
 from .dateianalyse import DateiAnalysator
 from .datenbank import ReferenzRepository, erzeuge_repository
 from .einstellungen import EinstellungsVerwalter, konfigurationsverzeichnis
-from .eplan_parser import EplanDateiLeser
+from .eplan_parser import EplanDateiLeser, erzeuge_diagnosebericht
 from .export import EXPORTER, exportiere_fehlerliste
 from .gui_arbeiter import Aufgabenfunktion, HintergrundAufgabe
 from .gui_dialoge import (
@@ -146,6 +146,8 @@ class Hauptfenster(QMainWindow):
         self.a_struktur = aktion("Dateistruktur analysieren …", self._struktur_analysieren,
                                  tip="Untersucht den tatsächlichen Aufbau einer beliebigen Datei")
         self.a_einleseprotokoll = aktion("Einleseprotokoll …", self._zeige_einleseprotokoll)
+        self.a_diagnose = aktion("Diagnosebericht speichern …", self._diagnose_speichern,
+                                 tip="Speichert Teildateien, Warnungen und Dateistruktur der geöffneten Datei als Textdatei")
         self.a_protokoll = aktion("Protokoll anzeigen …", self._zeige_protokoll)
         self.a_ueber = aktion("Über …", self._ueber)
 
@@ -163,7 +165,7 @@ class Hauptfenster(QMainWindow):
         pruefung.addAction(self.a_abbrechen)
         extras = menue.addMenu("&Extras")
         extras.addActions([self.a_einstellungen, self.a_struktur, self.a_einleseprotokoll,
-                           self.a_protokoll])
+                           self.a_diagnose, self.a_protokoll])
         hilfe = menue.addMenu("&Hilfe")
         hilfe.addAction(self.a_ueber)
 
@@ -321,6 +323,7 @@ class Hauptfenster(QMainWindow):
         self.a_seite.setEnabled(hat_daten)
         self.a_einstellungen.setEnabled(frei)
         self.a_einleseprotokoll.setEnabled(self._ergebnis is not None)
+        self.a_diagnose.setEnabled(self._ergebnis is not None)
         self.a_abbrechen.setEnabled(not frei)
         self.b_uebernehmen.setEnabled(frei and hat_fehler)
         self.b_seite.setEnabled(hat_daten)
@@ -474,7 +477,9 @@ class Hauptfenster(QMainWindow):
             self._status("Keine SPS-Datensätze gefunden.")
             zeige_warnung(self, "Keine Datensätze",
                           "In der Datei wurden keine SPS-Datensätze gefunden.\n\n"
-                          "Das Einleseprotokoll zeigt, wie die Datei aufgebaut ist und was erkannt wurde.")
+                          "Das Einleseprotokoll zeigt, wie die Datei aufgebaut ist und was erkannt wurde.\n"
+                          "Über Extras ▸ Diagnosebericht speichern lässt sich das als Textdatei sichern.\n\n"
+                          + (ergebnis.warnungen[-1] if ergebnis.warnungen else ""))
             EinleseberichtDialog(ergebnis, self).exec()
             return
         self._status(f"{len(ergebnis.datensaetze)} Datensätze auf {len(ergebnis.seiten)} Seiten eingelesen.")
@@ -663,6 +668,29 @@ class Hauptfenster(QMainWindow):
     def _zeige_einleseprotokoll(self) -> None:
         if self._ergebnis is not None:
             EinleseberichtDialog(self._ergebnis, self).exec()
+
+    def _diagnose_speichern(self) -> None:
+        if self._ergebnis is None:
+            return
+        start = str(Path(self._einstellungen.allgemein.letztes_verzeichnis or Path.home())
+                    / f"Diagnose_{Path(self._ergebnis.quelle).stem}.txt")
+        pfad, _ = QFileDialog.getSaveFileName(self, "Diagnosebericht speichern", start, "Textdatei (*.txt)")
+        if pfad:
+            self.diagnose_speichern_nach(Path(pfad))
+
+    def diagnose_speichern_nach(self, pfad: Path) -> bool:
+        """Schreibt den Diagnosebericht (enthält Dateipfade, aber keine Passwörter)."""
+        if self._ergebnis is None:
+            return False
+        try:
+            pfad.write_text(erzeuge_diagnosebericht(self._ergebnis), encoding="utf-8")
+        except OSError as fehler:
+            zeige_fehler(self, "Diagnosebericht", f"Die Datei konnte nicht geschrieben werden:\n{pfad}\n{fehler}")
+            return False
+        _log.info("Diagnosebericht gespeichert: %s", pfad)
+        zeige_information(self, "Diagnosebericht", f"Der Bericht wurde gespeichert:\n{pfad}\n\n"
+                          "Er enthält Dateipfade und Dateinamen Ihres Projekts. Bitte vor der Weitergabe prüfen.")
+        return True
 
     def _zeige_protokoll(self) -> None:
         ProtokollDialog(self).exec()

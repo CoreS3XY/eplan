@@ -126,7 +126,7 @@ eplan/
 │   ├── gui_dialoge.py         Einstellungen, Seitenansicht, Berichte
 │   ├── gui_modelle.py         Qt-Tabellenmodelle, Filter
 │   └── gui_arbeiter.py        Hintergrund-Threads
-└── tests/                     122 automatische Tests
+└── tests/                     130 automatische Tests
 ```
 
 ## Tests
