@@ -59,15 +59,29 @@ Zusätzlich liefert die **Dateistrukturanalyse** (`DateiAnalysator`, Menü *Extr
 * **Annahme zum „sichtbaren BMK":** Werte wie `=U4+E2/2.2` sehen wie EPLAN-Fundstellen aus (Seite 2, Spalte 2). Fehlt in
   der Quelle eine Seite, wird daraus Seitenreferenz und Seitennummer abgeleitet. Das wurde nicht an EPLAN-Dokumentation
   überprüft.
-* **DXF:** Das ASCII-DXF-Format ist öffentlich spezifiziert, **wo EPLAN die SPS-Anschlüsse darin ablegt, ist nicht
-  belegt**. Der Leser unterstützt (A) Attribute an Blöcken und (B) Tabellen aus Textobjekten und ordnet sie über die
-  Feldzuordnung zu. Als SPS-Adresse ist auf Angabe des Anwenders `EPLAN426` voreingestellt; weitere Attribut-Namen
-  (z. B. für BMK, Funktionstext, Symbol) sind **nicht bekannt** und müssen ggf. in den Einstellungen ergänzt werden.
-  Findet der Leser nichts, schreibt er Entitätsarten, Blöcke, Attribut-Namen mit Beispielwerten und Texte in den
-  Strukturbericht (*Extras ▸ Diagnosebericht speichern*) – damit lässt sich die Zuordnung ohne Rätselraten ergänzen.
-* **Offene Fragen zu DXF:** Binär-DXF wird abgelehnt; verschachtelte Blöcke, mehrzeilige Zellen und rechtsbündig
-  ausgerichtete Tabellenspalten sind nicht berücksichtigt. Die Seite stammt aus dem Dateinamen (`_N2_E2_1.dxf` →
-  `=N2+E2/1`); der Seitenname ist aus der DXF nicht ableitbar.
+* **DXF (an einer echten EPLAN-Seite verifiziert):** Eine vom Anwender bereitgestellte EPLAN-DXF (Format R2018,
+  `_N2_E2_1.dxf`, 131 Symbolblöcke, 1151 Attribute) zeigt, wie EPLAN die Daten ablegt – als **Block-Attribute**, deren Name
+  `<Objekttyp>_<EPLAN-Eigenschaftsnummer>` lautet (`17` = Funktion, `4` = Seite):
+
+  | Attribut | Inhalt | Feld |
+  |---|---|---|
+  | `17_20400` | `A42.0` | SPS-Adresse |
+  | `17_20402` | `N2ASpfVor` | Symbolische Adresse |
+  | `17_20031` (+ `17_20031/1` …) | `Spaenefoerderer Leistungsschalter` + `nicht ausgeloest` | Funktionstext (Fortsetzungen werden angehängt) |
+  | `17_20006` | `=G2+E2-KA42.0` | vollständiges BMK |
+  | `17_20010` | `-Q1`, `+T1-M1` | sichtbares BMK (an Betriebsmitteln, nicht an den SPS-Anschlüssen dieser Seite) |
+  | `4_11009` (Block `EPLFRAME`) | `=N2+E2/1` | Seitenreferenz |
+  | `4_11011` (+ `/1`) | `Spaenefoerderer 1` + `links` | Seitenname |
+  | `17_20028[1]` | `1`, `2`, `9` … | „Anschl." – wird derzeit nicht übernommen |
+
+  Der Leser liefert aus dieser Datei genau die sechs Zeilen des Beispiels des Anwenders. **Einschränkung:** Die Zuordnung
+  der Nummern ergibt sich aus den Werten dieser einen Datei, nicht aus EPLAN-Dokumentation. Der EPLAN-TechTipp (siehe oben)
+  nennt für die symbolische Adresse abweichend 20404; in dieser Datei steht sie in 20402. Weicht Ihre EPLAN-Version ab,
+  passen Sie die Bezeichnungen unter *Einstellungen ▸ Feldzuordnung* an; der Diagnosebericht listet bei fehlenden Treffern
+  alle Attribut-Namen mit Beispielwerten.
+  Die Seitendaten stehen im Rahmenblock und gelten für alle Datensätze der Datei; fehlen sie, wird die Seite aus dem
+  Dateinamen abgeleitet. Zusätzlich werden Texttabellen aus `TEXT`/`MTEXT` unterstützt (nicht an echten Dateien erprobt).
+  Binär-DXF wird abgelehnt; verschachtelte Blöcke und mehrzeilige Zellen in Texttabellen sind nicht berücksichtigt.
 
 ## 3. Verlässliche Alternative über EPLAN selbst
 

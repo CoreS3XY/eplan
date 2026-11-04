@@ -32,7 +32,7 @@ Ob Ihre Projektdateien direkt lesbar sind, zeigt der erste Öffnungsversuch. Det
 | Format | Inhalt | Stand |
 |---|---|---|
 | `*.txt` / `*.csv` / `*.tsv` | Listen, z. B. `Symbolische Adresse ⇥ Adresse ⇥ Funktionstext ⇥ Sichtbares BMK ⇥ Vollständiges BMK`; Trennzeichen wird erkannt (Tabulator, `;`, `,`), auch bei mehreren Tabulatoren zur Ausrichtung | getestet mit dem Beispiel des Anwenders |
-| `*.dxf` | eine Seite des E-Plans je Datei; Datensätze aus **Block-Attributen** (`INSERT`/`ATTRIB`) oder aus einer **Texttabelle** (Kopfzeile Anschl./BMK/Funktionstext/Symbolische Adresse/Adresse); Seite aus dem Dateinamen (`_N2_E2_1.dxf` → `=N2+E2/1`) | getestet nur mit nach DXF-Spezifikation erzeugten Dateien, **nicht** mit echten EPLAN-DXF |
+| `*.dxf` | eine Seite des E-Plans je Datei; Datensätze aus den **Block-Attributen** des EPLAN-Exports (`17_20400` Adresse, `17_20402` Symbol, `17_20031` Funktionstext, `17_20006` BMK; Seite und Seitenname aus dem Rahmenblock `4_11009`/`4_11011`), ersatzweise aus einer Texttabelle; Seite sonst aus dem Dateinamen | an einer **echten EPLAN-DXF (R2018)** verifiziert: liefert die 6 erwarteten Zeilen. Andere EPLAN-Versionen: Feldzuordnung anpassen |
 | `*.xlsx`, `*.xml`, SQLite | siehe oben | getestet |
 | `*.elk`, `*.zw1` | siehe oben | Format proprietär, nicht direkt lesbar, siehe `docs/ANALYSE.md` |
 
@@ -142,7 +142,7 @@ eplan/
 │   ├── gui_dialoge.py         Einstellungen, Seitenansicht, Berichte
 │   ├── gui_modelle.py         Qt-Tabellenmodelle, Filter
 │   └── gui_arbeiter.py        Hintergrund-Threads
-└── tests/                     160 automatische Tests
+└── tests/                     163 automatische Tests
 ```
 
 ## Tests

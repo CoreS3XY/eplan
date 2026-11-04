@@ -109,7 +109,7 @@ def test_alte_konfiguration_erhaelt_neue_standardbezeichnungen(tmp_path):
                     encoding="utf-8")
     z = EinstellungsVerwalter(pfad).laden().feldzuordnung
     assert z["betriebsmittelkennzeichen"][0] == "MeinBMK" and "Sichtbares BMK" in z["betriebsmittelkennzeichen"]
-    assert "Klemme" in z["sps_adresse"] and "EPLAN426" in z["sps_adresse"]
+    assert "Klemme" in z["sps_adresse"] and "17_20400" in z["sps_adresse"]
     assert "Vollständiges BMK" in z["vollstaendiges_bmk"]
     # gespeichert mit Version: spätere Entfernung einer Bezeichnung durch den Anwender bleibt bestehen
     e = EinstellungsVerwalter(pfad).laden()

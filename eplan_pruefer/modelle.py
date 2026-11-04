@@ -279,7 +279,7 @@ FELDNAMEN: tuple[str, ...] = (
 
 #: Version der Standard-Feldzuordnung. Wird sie erhöht, ergänzt das Laden alter Konfigurationen
 #: die neuen Standardbezeichnungen (vorhandene Einträge des Anwenders bleiben erhalten).
-FELDZUORDNUNG_VERSION = 2
+FELDZUORDNUNG_VERSION = 3
 
 FELD_ANZEIGENAMEN: dict[str, str] = {
     "symbolische_adresse": "Symbolische Adresse",
@@ -295,19 +295,21 @@ FELD_ANZEIGENAMEN: dict[str, str] = {
 #: Standard-Bezeichnungen, unter denen die Felder in Exporten/XML/Tabellen vorkommen.
 #: Alle Vergleiche sind unabhängig von Groß-/Kleinschreibung, Leer- und Sonderzeichen.
 STANDARD_FELDZUORDNUNG: dict[str, tuple[str, ...]] = {
+    # Die Bezeichnungen „17_…" und „4_…" sind Attribut-Namen aus EPLAN-DXF-Exporten
+    # (<Objekttyp>_<EPLAN-Eigenschaftsnummer>): 17 = Funktion, 4 = Seite.
     "symbolische_adresse": ("Symbolische Adresse", "Symbolic address", "SymbolicAddress",
-                            "Symbol", "Symbolik"),
+                            "Symbol", "Symbolik", "17_20402"),
     "funktionstext": ("Funktionstext", "Funktionstext (Langtext)", "Function text",
-                      "FunctionText", "Langtext"),
-    "sps_adresse": ("SPS-Adresse", "PLC address", "PLCAddress", "Adresse", "Address", "EPLAN426"),
+                      "FunctionText", "Langtext", "17_20031"),
+    "sps_adresse": ("SPS-Adresse", "PLC address", "PLCAddress", "Adresse", "Address", "17_20400"),
     "seitenreferenz": ("Seitenreferenz", "Seitenbezeichnung", "Seitenverweis",
-                       "Page designation", "Page reference"),
+                       "Page designation", "Page reference", "4_11009"),
     "seitennummer": ("Seitennummer", "Seite", "Page", "Page number", "Blatt"),
-    "seitenname": ("Seitenname", "Seitentitel", "Seitenbeschreibung", "Page name"),
+    "seitenname": ("Seitenname", "Seitentitel", "Seitenbeschreibung", "Page name", "4_11011"),
     "betriebsmittelkennzeichen": ("Betriebsmittelkennzeichen", "BMK", "Sichtbares BMK",
-                                  "Device tag", "DeviceTag", "Equipment identifier", "Betriebsmittel"),
+                                  "Device tag", "DeviceTag", "Equipment identifier", "Betriebsmittel", "17_20010"),
     "vollstaendiges_bmk": ("Vollständiges BMK", "Vollstaendiges BMK",
-                           "Vollständiges Betriebsmittelkennzeichen", "Full device tag"),
+                           "Vollständiges Betriebsmittelkennzeichen", "Full device tag", "17_20006"),
 }
 
 

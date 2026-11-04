@@ -5,9 +5,13 @@ Das ASCII-DXF-Format ist öffentlich spezifiziert (Paare aus Gruppencode und Wer
 SPS-Anschlüsse in der DXF ablegt, hängt jedoch vom Export ab. Der Extraktor unterstützt deshalb
 zwei Darstellungen und nutzt die konfigurierbare Feldzuordnung:
 
-A. **Attribute**: Ein ``INSERT`` (Symbol/Block) trägt ``ATTRIB``-Einträge; deren Namen (Tags, z. B.
-   ``EPLAN426``) bzw. deren Beschriftung werden den Feldern zugeordnet. Je Block mit passenden
-   Attributen entsteht ein Datensatz.
+A. **Attribute** (so schreibt EPLAN): Ein ``INSERT`` (Symbolblock) trägt ``ATTRIB``-Einträge, deren
+   Namen die Form ``<Objekttyp>_<Eigenschaftsnummer>`` haben, z. B. ``17_20400`` (SPS-Adresse),
+   ``17_20402`` (symbolische Adresse), ``17_20031`` (Funktionstext), ``17_20006`` (vollständiges BMK).
+   Lange Texte stehen in Fortsetzungs-Attributen (``17_20031/1`` …) und werden zusammengefügt.
+   Je Block mit SPS-Adresse oder symbolischer Adresse entsteht ein Datensatz. Die Seitendaten
+   stehen in einem anderen Block (Rahmen ``EPLFRAME``: ``4_11009`` Seitenreferenz, ``4_11011``
+   Seitenname) und gelten für alle Datensätze der Datei.
 B. **Texttabelle**: ``TEXT``/``MTEXT``-Objekte bilden eine Tabelle mit Kopfzeile (z. B. „Anschl.",
    „BMK", „Funktionstext", „Symbolische Adresse", „Adresse"). Die Spalten ergeben sich aus den
    X-Positionen der Kopfzeile, die Zeilen aus den Y-Positionen.
@@ -16,8 +20,8 @@ Liefert eine DXF-Datei keine Datensätze, wird ihr Aufbau (Entitätsarten, Attri
 Beispielwerten, Texte) in den Strukturbericht geschrieben, damit die Feldzuordnung angepasst oder
 der Extraktor erweitert werden kann.
 
-Seitenangaben: Der Dateiname ``_N2_E2_1.dxf`` ergibt die Seitenreferenz ``=N2+E2/1`` und die
-Seitennummer ``1``. Der Projektbaum (Unterordner) steht in der Fundstelle.
+Seitenangaben: aus den Seitenattributen der Datei; fehlen sie, aus dem Dateinamen
+(``_N2_E2_1.dxf`` -> ``=N2+E2/1``, Seitennummer ``1``). Der Projektbaum (Unterordner) steht in der Fundstelle.
 
 Nicht unterstützt: Binär-DXF (wird mit klarer Meldung abgelehnt).
 """
@@ -45,6 +49,9 @@ _log = hole_protokollierer("dxf")
 
 MAX_DIAGNOSEN = 3                  # so viele DXF-Dateien ohne Treffer werden ausführlich beschrieben
 _SEITENNUMMER = re.compile(r"^\d+(?:\.\w+)?$")
+#: EPLAN legt lange Texte in Fortsetzungs-Attributen ab: ``17_20031`` + ``17_20031/1`` + ``17_20031/2`` …
+_ATTRIBUTNAME = re.compile(r"^(?P<basis>.+?)(?:/(?P<fortsetzung>\d+))?$")
+_SEITENFELDER = ("seitenreferenz", "seitennummer", "seitenname")
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +113,28 @@ class _Text:
     hoehe: float
     text: str
     zeile: int
+
+
+def _attribute_zu_feldern(attribute: list[_Entitaet], zuordner: Feldzuordner,
+                          beispiele: dict[str, list[str]]) -> dict[str, str]:
+    """Ordnet die Attribute eines Blocks den Feldern zu; Fortsetzungs-Attribute (``…/1``) werden angehängt."""
+    teile: dict[str, list[tuple[int, int, str]]] = {}
+    for reihenfolge, attribut in enumerate(attribute):
+        marke = attribut.erste(2).strip()
+        wert = bereinige_dxf_text(attribut.erste(1))
+        if marke:
+            gesehen = beispiele.setdefault(marke, [])
+            if wert and len(gesehen) < 3 and wert not in gesehen:
+                gesehen.append(wert)
+        if not (marke and wert):
+            continue
+        treffer = _ATTRIBUTNAME.match(marke)
+        basis = treffer.group("basis") if treffer else marke
+        feld = zuordner.feld_fuer(basis) or zuordner.feld_fuer(marke)
+        if feld:
+            fortsetzung = int(treffer.group("fortsetzung") or 0) if treffer else 0
+            teile.setdefault(feld, []).append((fortsetzung, reihenfolge, wert))
+    return {feld: " ".join(w for _, _, w in sorted(werte)) for feld, werte in teile.items()}
 
 
 def _entitaeten(text: str) -> Iterator[_Entitaet]:
@@ -239,65 +268,58 @@ class DxfExtraktor(DatensatzExtraktor):
         text = _dekodiere_text(roh)
 
         referenz, nummer = leite_seite_aus_dateiname(teildatei.name)
-        seite = {"seitenreferenz": referenz, "seitennummer": nummer}
+        seite_namen = {"seitenreferenz": referenz, "seitennummer": nummer}      # Ersatz, falls die Datei nichts enthält
+        seite_datei: dict[str, str] = {}                                        # Seitenattribute aus der Datei
         zuordner = kontext.zuordner
 
         texte: list[_Text] = []
         arten: Counter[str] = Counter()
         attribut_beispiele: dict[str, list[str]] = {}
         bloecke: Counter[str] = Counter()
-        gefunden = 0
+        kandidaten: list[tuple[dict[str, str], int, str]] = []                  # (Felder, Zeile, Blockname)
 
         einfuegung: _Entitaet | None = None
         attribute: list[_Entitaet] = []
 
-        def abschliessen() -> EplanDatensatz | None:
+        def abschliessen() -> None:
             nonlocal einfuegung, attribute
-            ergebnis = None
             if einfuegung is not None and attribute:
-                felder = dict(seite)
-                for attribut in attribute:
-                    wert = bereinige_dxf_text(attribut.erste(1))
-                    marke = attribut.erste(2).strip()
-                    feld = zuordner.feld_fuer(marke)
-                    if marke:
-                        beispiele = attribut_beispiele.setdefault(marke, [])
-                        if wert and len(beispiele) < 3 and wert not in beispiele:
-                            beispiele.append(wert)
-                    if feld and wert:
-                        felder[feld] = wert
-                ergebnis = erzeuge_datensatz(
-                    felder, kontext.fundstelle(teildatei.name, einfuegung.zeile,
-                                               f"Block {einfuegung.erste(2).strip() or '?'}"))
+                felder = _attribute_zu_feldern(attribute, zuordner, attribut_beispiele)
+                if felder.get("sps_adresse") or felder.get("symbolische_adresse"):
+                    kandidaten.append((felder, einfuegung.zeile, einfuegung.erste(2).strip()))
+                else:                                   # z. B. Zeichnungsrahmen mit Seitenattributen
+                    for name in _SEITENFELDER:
+                        if felder.get(name):
+                            seite_datei.setdefault(name, felder[name])
             einfuegung, attribute = None, []
-            return ergebnis
 
         for zaehler, entitaet in enumerate(_entitaeten(text)):
             if zaehler % 5000 == 0:
                 kontext.pruefe_abbruch()
             arten[entitaet.art] += 1
             if entitaet.art == "INSERT":
-                datensatz = abschliessen()
-                if datensatz is not None:
-                    gefunden += 1
-                    yield datensatz
+                abschliessen()
                 einfuegung = entitaet
                 bloecke[entitaet.erste(2).strip()] += 1
             elif entitaet.art == "ATTRIB" and einfuegung is not None:
                 attribute.append(entitaet)
             else:
-                datensatz = abschliessen()
-                if datensatz is not None:
-                    gefunden += 1
-                    yield datensatz
+                abschliessen()
                 if entitaet.art in ("TEXT", "MTEXT"):
                     gefundener_text = _als_text(entitaet)
                     if gefundener_text is not None:
                         texte.append(gefundener_text)
-        datensatz = abschliessen()
-        if datensatz is not None:
-            gefunden += 1
-            yield datensatz
+        abschliessen()
+
+        # Seite: Attribute der Datei haben Vorrang vor dem Dateinamen
+        seite = {**{k: v for k, v in seite_namen.items() if v}, **seite_datei}
+        gefunden = 0
+        for felder, zeile, blockname in kandidaten:
+            datensatz = erzeuge_datensatz(
+                {**seite, **felder}, kontext.fundstelle(teildatei.name, zeile, f"Block {blockname or '?'}"))
+            if datensatz is not None:
+                gefunden += 1
+                yield datensatz
 
         aus_tabelle = 0
         for datensatz in _tabellen_datensaetze(texte, zuordner, teildatei.name, kontext, seite):
@@ -324,3 +346,50 @@ class DxfExtraktor(DatensatzExtraktor):
             z.extend(f"    {t.x:.1f}, {t.y:.1f}: {t.text[:70]}" for t in texte[:15])
         z.append("  Hinweis: Passende Attribut-Namen bzw. Überschriften unter Einstellungen ▸ Feldzuordnung eintragen.")
         return "\n".join(z)
+
+
+def entitaets_auszug(text: str, zeile: int, max_entitaeten: int = 80) -> list[tuple[int, str]]:
+    """
+    Lesbare Zusammenfassung der DXF-Entitäten ab ``zeile`` (Quellauszug für „Sprung zur Fundstelle").
+
+    Ein Attribut-Block belegt in EPLAN-DXF rund 500 Zeilen aus Gruppencodes; angezeigt werden daher je
+    Entität nur Art, Name (Gruppe 2) und Wert (Gruppe 1), z. B. ``ATTRIB 17_20400 = A42.0``.
+    Die Zusammenfassung endet nach ``SEQEND`` oder nach ``max_entitaeten`` Entitäten.
+    """
+    zeilen = re.split(r"\r?\n", text)
+    ergebnis: list[tuple[int, str]] = []
+    art, start, name, wert = "", 0, "", ""
+
+    def abschliessen() -> None:
+        if art:
+            teile = [art]
+            if name:
+                teile.append(name)
+            if wert:
+                teile.append(f"= {bereinige_dxf_text(wert)[:120]}")
+            ergebnis.append((start, " ".join(teile)))
+
+    index = max(zeile - 1, 0)
+    while index < len(zeilen) - 1 and len(ergebnis) < max_entitaeten:
+        try:
+            code = int(zeilen[index].strip())
+        except ValueError:
+            break
+        inhalt = zeilen[index + 1]
+        if code == 0:
+            abschliessen()
+            marke = inhalt.strip()
+            if marke in ("SEQEND", "ENDSEC", "EOF"):
+                if marke == "SEQEND":
+                    ergebnis.append((index + 1, "SEQEND"))
+                art = ""
+                break
+            art, start, name, wert = marke, index + 1, "", ""
+        elif art and code == 2 and not name:
+            name = inhalt.strip()
+        elif art and code == 1 and not wert:
+            wert = inhalt
+        index += 2
+    if art:                         # Schleife ohne SEQEND beendet: letzte Entität noch ausgeben
+        abschliessen()
+    return ergebnis

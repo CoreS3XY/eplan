@@ -1041,15 +1041,15 @@ class QuellenAuszugLeser:
         if endung in (".xlsx", ".xlsm") or teildatei.lese_kopf(16).startswith(b"SQLite format 3\x00"):
             return Quellauszug([], None, f"Binäre Quelle – {fundstelle.element}, Zeile {fundstelle.zeile}.")
         text = _dekodiere_text(teildatei.lese_alles())
+        if endung == ".dxf":
+            from .dxf_parser import entitaets_auszug     # hier importiert: dxf_parser nutzt dieses Modul
+            ausschnitt_dxf = entitaets_auszug(text, fundstelle.zeile or 1)
+            hinweis = "" if ausschnitt_dxf else "Ab dieser Zeile wurden keine DXF-Entitäten gefunden."
+            return Quellauszug(ausschnitt_dxf, fundstelle.zeile, hinweis)
         zeilen = text.splitlines()
         ziel = fundstelle.zeile or 1
         start = max(1, ziel - umgebung)
         ende = min(len(zeilen), ziel + umgebung)
-        if endung == ".dxf":
-            # Eine DXF-Entität belegt viele Zeilen (Gruppencode/Wert); die Fundstelle zeigt auf ihren
-            # Beginn, der Inhalt steht darunter.
-            start = max(1, ziel - 2)
-            ende = min(len(zeilen), ziel + max(umgebung, 80))
         ausschnitt: list[tuple[int, str]] = []
         for nummer in range(start, ende + 1):
             inhalt = zeilen[nummer - 1]

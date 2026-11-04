@@ -92,7 +92,7 @@ def test_texttabelle_wie_im_beispiel_des_anwenders(tmp_path):
 
 
 def test_attribute_an_bloecken(tmp_path):
-    zeilen = [einfuegung("SPS_ANSCHLUSS", {"SYMBOLISCHE_ADRESSE": s, "FUNKTIONSTEXT": t, "BMK": b, "EPLAN426": a})
+    zeilen = [einfuegung("SPS_ANSCHLUSS", {"SYMBOLISCHE_ADRESSE": s, "FUNKTIONSTEXT": t, "BMK": b, "17_20400": a})
               for _, b, t, s, a in ZEILEN[:2]]
     pfad = tmp_path / "_N2_E2_4.dxf"
     pfad.write_text(dxf(*zeilen, einfuegung("OHNE", {"X": "y"}), text(0, 0, "Seitentitel")), encoding="utf-8")
@@ -103,9 +103,9 @@ def test_attribute_an_bloecken(tmp_path):
 
 
 def test_blockdefinitionen_und_leere_attribute_liefern_nichts(tmp_path):
-    bloecke = paare((0, "BLOCK"), (2, "SPS_ANSCHLUSS"), (0, "ATTDEF"), (2, "EPLAN426"), (1, "E0.0"), (0, "ENDBLK"))
+    bloecke = paare((0, "BLOCK"), (2, "SPS_ANSCHLUSS"), (0, "ATTDEF"), (2, "17_20400"), (1, "E0.0"), (0, "ENDBLK"))
     pfad = tmp_path / "_A_1.dxf"
-    pfad.write_text(dxf(einfuegung("SPS_ANSCHLUSS", {"EPLAN426": ""}), bloecke=bloecke), encoding="utf-8")
+    pfad.write_text(dxf(einfuegung("SPS_ANSCHLUSS", {"17_20400": ""}), bloecke=bloecke), encoding="utf-8")
     ergebnis = lese(pfad)
     assert ergebnis.datensaetze == []
 
@@ -185,8 +185,8 @@ def test_quellauszug_zeigt_dxf_zeilen(tmp_path):
     d = ergebnis.datensaetze[2]
     auszug = QuellenAuszugLeser().lese(tmp_path / "P", d.fundstelle, umgebung=3)
     assert auszug.markierte_zeile == d.fundstelle.zeile
-    assert any(zeile.strip() == "TEXT" for _, zeile in auszug.zeilen)      # Entität beginnt in der Markierung
-    assert any(zeile.strip() == "N2ESpfRcklf" for _, zeile in auszug.zeilen)      # ganze Tabellenzeile sichtbar
+    assert auszug.zeilen[0][0] == d.fundstelle.zeile and auszug.zeilen[0][1].startswith("TEXT")
+    assert any("= N2ESpfRcklf" in zeile for _, zeile in auszug.zeilen)      # ganze Tabellenzeile sichtbar
 
 
 def test_ordner_in_der_oberflaeche(tmp_path, monkeypatch):
@@ -211,3 +211,66 @@ def test_ordner_in_der_oberflaeche(tmp_path, monkeypatch):
         assert fenster._datensatz_modell.index(0, 4).data() == "1"
     finally:
         fenster.close()
+
+
+# ---------------------------------------------------------------------------
+# Aufbau einer echten EPLAN-DXF (R2018): Attribute „<Objekttyp>_<Eigenschaftsnummer>", Seitendaten im
+# Rahmen-Block EPLFRAME, lange Texte in Fortsetzungs-Attributen. Werte stammen aus dem Beispiel des Anwenders.
+# ---------------------------------------------------------------------------
+
+def eplan_sps_block(anschl: str, bmk: str, text: str, symbol: str, adresse: str, text2: str = "") -> str:
+    attribute = {"17_20028[1]": anschl, "17_20301": "=G2/16.1", "17_20402": symbol, "17_20006": bmk,
+                 "17_20031": text, "17_20400": adresse, "17_20406": "", "17_20428": ""}
+    if text2:
+        attribute["17_20031/1"] = text2
+    return einfuegung("EPLSYM_LibraryIEC_symbol_Symbol358_Variant0_Placement1", attribute)
+
+
+def eplan_rahmen() -> str:
+    return einfuegung("EPLFRAME", {"14_10013": "80079501", "4_11009": "=N2+E2/1", "4_11011": "Spaenefoerderer 1",
+                                   "4_11011/1": "links", "4_11000": "1", "4_1120": "N2", "4_1220": "E2"})
+
+
+def test_echter_eplan_aufbau_wie_im_beispiel_des_anwenders(tmp_path):
+    ordner = tmp_path / "Projekt" / "N2" / "E2"
+    ordner.mkdir(parents=True)
+    zeilen = [
+        eplan_sps_block("1", "=G2+E2-KA42.0", "Spaenefoerderer vor", "N2ASpfVor", "A42.0"),
+        eplan_sps_block("12", "=G2+E2-KE44.0", "Spaenefoerderer Leistungsschalter", "N2ESpfLsAglN", "E45.3",
+                        "nicht ausgeloest"),
+        einfuegung("EPLSYM_LibraryIEC_symbol_Symbol31_Variant0_Placement1",           # Betriebsmittel ohne SPS-Bezug
+                   {"17_20010": "-Q1", "17_20027": "24V", "17_20006": "=G2+E2-Q1"}),
+    ]
+    # Der Rahmen steht NACH den Funktionen: die Seitendaten müssen trotzdem gelten.
+    (ordner / "_N2_E2_1.dxf").write_text(dxf(*zeilen, eplan_rahmen()), encoding="utf-8")
+    ergebnis = lese(tmp_path / "Projekt")
+    d = ergebnis.datensaetze
+    assert len(d) == 2 and not ergebnis.warnungen
+    assert (d[0].symbolische_adresse, d[0].sps_adresse, d[0].funktionstext) == \
+        ("N2ASpfVor", "A42.0", "Spaenefoerderer vor")
+    assert d[0].vollstaendiges_bmk == "=G2+E2-KA42.0" and d[0].betriebsmittelkennzeichen == ""
+    assert d[1].funktionstext == "Spaenefoerderer Leistungsschalter nicht ausgeloest"      # Fortsetzung angehängt
+    assert (d[0].seitenreferenz, d[0].seitennummer, d[0].seitenname) == ("=N2+E2/1", "1", "Spaenefoerderer 1 links")
+    assert d[0].seite_ausfuehrlich == "1 – Spaenefoerderer 1 links"
+
+
+def test_seitenattribute_haben_vorrang_vor_dem_dateinamen(tmp_path):
+    pfad = tmp_path / "_X_Y_7.dxf"
+    pfad.write_text(dxf(eplan_sps_block("1", "=A", "Text", "Sym", "E1.0"), eplan_rahmen()), encoding="utf-8")
+    assert lese(pfad).datensaetze[0].seitenreferenz == "=N2+E2/1"
+    ohne_rahmen = tmp_path / "_X_Y_8.dxf"
+    ohne_rahmen.write_text(dxf(eplan_sps_block("1", "=A", "Text", "Sym", "E1.0")), encoding="utf-8")
+    assert lese(ohne_rahmen).datensaetze[0].seitenreferenz == "=X+Y/8"
+
+
+def test_quellauszug_zeigt_attribute_lesbar(tmp_path):
+    pfad = tmp_path / "_N2_E2_1.dxf"
+    pfad.write_text(dxf(eplan_sps_block("1", "=G2+E2-KA42.0", "Spaenefoerderer vor", "N2ASpfVor", "A42.0"),
+                        eplan_sps_block("2", "=G2+E2-KA42.0", "Zweiter", "N2ASpfZur", "A42.1")), encoding="utf-8")
+    d = lese(pfad).datensaetze[0]
+    auszug = QuellenAuszugLeser().lese(pfad, d.fundstelle)
+    zeilen = [z for _, z in auszug.zeilen]
+    assert zeilen[0] == "INSERT EPLSYM_LibraryIEC_symbol_Symbol358_Variant0_Placement1"
+    assert "ATTRIB 17_20400 = A42.0" in zeilen and "ATTRIB 17_20402 = N2ASpfVor" in zeilen
+    assert zeilen[-1] == "SEQEND"                       # endet am Blockende, zeigt nicht den nächsten Block
+    assert not any("A42.1" in z for z in zeilen)
