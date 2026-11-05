@@ -88,7 +88,17 @@ def beende(prozess: subprocess.Popen) -> None:
         pass
 
 
+def _ausgabe_auf_utf8_stellen() -> None:
+    """Windows-Konsolen verwenden oft cp1252; Ausgaben dürfen den Rauchtest nie zum Absturz bringen."""
+    for strom in (sys.stdout, sys.stderr):
+        try:
+            strom.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argumente: list[str]) -> int:
+    _ausgabe_auf_utf8_stellen()
     if len(argumente) != 1:
         print(__doc__)
         return 1
@@ -130,12 +140,12 @@ def main(argumente: list[str]) -> int:
     if bestanden:
         print("Rauchtest bestanden:")
         for muster in ERWARTET:
-            print(f"  ✔ {muster}")
+            print(f"  [ok] {muster}")
         return 0
     print("Rauchtest FEHLGESCHLAGEN. Nicht gefunden:")
     for muster in ERWARTET:
         if muster not in text:
-            print(f"  ✘ {muster}")
+            print(f"  [FEHLT] {muster}")
     print("--- Protokoll (Ende) ---")
     print("\n".join(text.splitlines()[-40:]) or "(kein Protokoll)")
     return 1
