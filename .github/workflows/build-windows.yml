@@ -1,0 +1,56 @@
+name: Windows-EXE bauen
+
+# Baut EplanPruefer.exe mit PyInstaller auf einem Windows-Runner, führt die Tests und einen Rauchtest der
+# gebauten Datei aus und legt die .exe als Artefakt ab (Actions ▸ Lauf ▸ Artifacts).
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Abhängigkeiten installieren
+        run: python -m pip install -r requirements-dev.txt pyinstaller
+
+      # Die Tests laufen hier erstmals unter Windows. Ein Fehlschlag verhindert die .exe nicht,
+      # wird aber als Warnung gemeldet (siehe letzter Schritt).
+      - name: Tests (ohne Bildschirm)
+        id: tests
+        continue-on-error: true
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: EXE bauen
+        run: pyinstaller --noconfirm EplanPruefer.spec
+
+      - name: Rauchtest der gebauten EXE
+        run: python scripts/rauchtest.py dist/EplanPruefer.exe
+
+      - name: Prüfsumme und Größe
+        run: |
+          $datei = Get-Item dist/EplanPruefer.exe
+          "### EplanPruefer.exe" >> $env:GITHUB_STEP_SUMMARY
+          "Größe: $([math]::Round($datei.Length / 1MB, 1)) MB" >> $env:GITHUB_STEP_SUMMARY
+          "SHA256: ``$((Get-FileHash $datei.FullName -Algorithm SHA256).Hash)``" >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EplanPruefer-Windows
+          path: dist/EplanPruefer.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Testergebnis melden
+        if: steps.tests.outcome == 'failure'
+        run: echo "::warning::Die Tests sind unter Windows fehlgeschlagen. Die EXE wurde trotzdem gebaut; siehe Schritt 'Tests'."

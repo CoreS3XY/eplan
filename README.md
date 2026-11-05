@@ -109,6 +109,28 @@ Kommandozeile: `python main.py [Datei] [--konfiguration PFAD] [--protokollstufe 
    **In Datenbank übernehmen** (Strg+D). Das Programm prüft Symbol, Funktionstext und Kombination, fragt bei
    Konflikten nach und prüft danach automatisch erneut.
 
+## Als .exe bauen (Windows)
+
+Eine Windows-`.exe` lässt sich nur unter Windows bauen (PyInstaller kompiliert nicht über Plattformen hinweg).
+
+**Über GitHub (empfohlen):** Der Workflow `.github/workflows/build-windows.yml` baut die Datei bei jedem Push und auf
+Knopfdruck (*Actions ▸ Windows-EXE bauen ▸ Run workflow*). Er führt die Tests unter Windows aus, startet die gebaute
+`.exe` mit Beispieldaten (Rauchtest: CSV, DXF-Projektbaum, SQLite-Abgleich) und legt sie als Artefakt
+**EplanPruefer-Windows** am Lauf ab (Download als ZIP, 30 Tage verfügbar).
+
+**Lokal unter Windows:**
+
+```bash
+pip install -r requirements-dev.txt pyinstaller
+pyinstaller --noconfirm EplanPruefer.spec
+python scripts/rauchtest.py dist/EplanPruefer.exe
+```
+
+Ergebnis: `dist\EplanPruefer.exe` – eine einzelne Datei ohne Python-Installation, ca. 60–70 MB. Der Start dauert wegen des
+Entpackens einige Sekunden. Konfiguration und Protokoll liegen wie sonst unter `%APPDATA%\EplanPruefer\`.
+Die `.exe` ist nicht signiert; Windows SmartScreen oder Virenscanner können bei unbekannten, nicht signierten
+Programmen warnen (bei PyInstaller-Dateien nicht selten) – im Zweifel die Prüfsumme (SHA256, im Lauf-Protokoll) vergleichen.
+
 ## Filter
 
 Jede Spalte der Fehlerliste **und** der Datensatzliste hat unter der Überschrift ein Filterfeld; zusätzlich gibt es eine
@@ -194,4 +216,3 @@ Die Datenbanktests laufen gegen **echte SQLite-Dateien** (kein Server nötig), d
 * **MySQL / SQL Server / Oracle:** weitere Klasse neben `SqliteReferenzRepository` (Schnittstelle `ReferenzRepository`),
   Auswahl über ein Konfigurationsfeld „Datenbanktyp". Eine frühere MySQL-Umsetzung steht in der Git-Historie.
 * **PDF-Export:** weitere Klasse von `FehlerExporter` und Eintrag in `EXPORTER`.
-* **Auslieferung als `.exe`:** z. B. mit PyInstaller (hier nicht erprobt).
